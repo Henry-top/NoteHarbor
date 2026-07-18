@@ -25,14 +25,20 @@ export function AppearancePopover({
   ];
 
   return (
-    <div className="appearance-popover">
+    <div className="appearance-popover" role="dialog" aria-label={t("appearance")}>
       <header>
         <span><Palette size={16} /> {t("appearance")}</span>
-        <button className="icon-button" onClick={onClose}><X size={15} /></button>
+        <button type="button" className="icon-button" onClick={onClose}><X size={15} /></button>
       </header>
       <div className="theme-cards">
         {themes.map((item) => (
-          <button key={item.id} className={theme === item.id ? "active" : ""} onClick={() => onThemeChange(item.id)}>
+          <button
+            type="button"
+            key={item.id}
+            aria-pressed={theme === item.id}
+            className={theme === item.id ? "active" : ""}
+            onClick={() => onThemeChange(item.id)}
+          >
             <span className="theme-swatch">
               {item.colors.map((color) => <i key={color} style={{ background: color }} />)}
             </span>
@@ -42,13 +48,13 @@ export function AppearancePopover({
         ))}
       </div>
       <div className="color-mode segmented">
-        <button className={colorMode === "system" ? "active" : ""} onClick={() => onColorModeChange("system")}>
+        <button type="button" aria-pressed={colorMode === "system"} className={colorMode === "system" ? "active" : ""} onClick={() => onColorModeChange("system")}>
           <Monitor size={14} /> {t("system")}
         </button>
-        <button className={colorMode === "light" ? "active" : ""} onClick={() => onColorModeChange("light")}>
+        <button type="button" aria-pressed={colorMode === "light"} className={colorMode === "light" ? "active" : ""} onClick={() => onColorModeChange("light")}>
           <Sun size={14} /> {t("light")}
         </button>
-        <button className={colorMode === "dark" ? "active" : ""} onClick={() => onColorModeChange("dark")}>
+        <button type="button" aria-pressed={colorMode === "dark"} className={colorMode === "dark" ? "active" : ""} onClick={() => onColorModeChange("dark")}>
           <Moon size={14} /> {t("dark")}
         </button>
       </div>

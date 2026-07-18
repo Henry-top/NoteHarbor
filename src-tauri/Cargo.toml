@@ -1,6 +1,6 @@
 [package]
 name = "noteharbor"
-version = "0.1.0"
+version = "0.1.1"
 description = "墨岛笔记 - 本地优先的 Markdown 个人笔记应用"
 authors = ["NoteHarbor"]
 edition = "2021"

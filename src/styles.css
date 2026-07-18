@@ -73,7 +73,7 @@
   --shadow: 0 18px 60px rgba(38, 60, 84, 0.18);
 }
 
-:root[data-color-mode="dark"] {
+:root[data-effective-color-mode="dark"] {
   color-scheme: dark;
   --accent: #66a7c3;
   --accent-strong: #85bbd0;
@@ -97,7 +97,7 @@
   --shadow-small: 0 8px 24px rgba(0, 0, 0, 0.3);
 }
 
-:root[data-theme="paper"][data-color-mode="dark"] {
+:root[data-theme="paper"][data-effective-color-mode="dark"] {
   --accent: #c59369;
   --accent-strong: #ddb083;
   --accent-soft: #483322;
@@ -116,7 +116,7 @@
   --text-faint: #75695e;
 }
 
-:root[data-theme="glass"][data-color-mode="dark"] {
+:root[data-theme="glass"][data-effective-color-mode="dark"] {
   --app-bg: linear-gradient(135deg, #17252d 0%, #252130 52%, #182825 100%);
   --surface: rgba(27, 36, 43, 0.72);
   --surface-raised: rgba(36, 47, 56, 0.86);
@@ -126,32 +126,6 @@
   --sidebar-bg: rgba(22, 30, 36, 0.72);
   --right-bg: rgba(23, 30, 36, 0.68);
   --editor-bg: rgba(27, 35, 42, 0.67);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root[data-color-mode="system"] {
-    color-scheme: dark;
-    --accent: #66a7c3;
-    --accent-strong: #85bbd0;
-    --accent-soft: #193846;
-    --app-bg: #151a1e;
-    --surface: #1d2328;
-    --surface-raised: #242b31;
-    --surface-muted: #20272c;
-    --surface-hover: #293137;
-    --surface-active: #2e3e46;
-    --sidebar-bg: #1a2025;
-    --right-bg: #1b2126;
-    --editor-bg: #1d2328;
-    --border: rgba(225, 235, 240, 0.09);
-    --border-strong: rgba(225, 235, 240, 0.16);
-    --text: #cad2d8;
-    --text-strong: #edf2f4;
-    --text-muted: #8f9ba3;
-    --text-faint: #626f77;
-    --shadow: 0 18px 60px rgba(0, 0, 0, 0.38);
-    --shadow-small: 0 8px 24px rgba(0, 0, 0, 0.3);
-  }
 }
 
 * {
@@ -257,6 +231,10 @@ input:focus-visible {
   align-items: center;
   gap: 9px;
   padding: 10px 10px 5px 16px;
+}
+
+.app-shell.native-macos .sidebar-titlebar {
+  padding-left: 80px;
 }
 
 .sidebar-titlebar strong {
@@ -602,6 +580,10 @@ kbd {
   backdrop-filter: blur(20px);
 }
 
+.app-shell.native-macos.sidebar-closed .workspace-topbar {
+  padding-left: 80px;
+}
+
 .breadcrumbs {
   min-width: 0;
   flex: 1;
@@ -632,6 +614,7 @@ kbd {
 .topbar-actions {
   display: flex;
   gap: 2px;
+  -webkit-app-region: no-drag;
 }
 
 .tab-strip {
@@ -1561,7 +1544,7 @@ kbd {
 
 .appearance-popover {
   position: absolute;
-  z-index: 30;
+  z-index: 100;
   top: 42px;
   right: 44px;
   width: 258px;
@@ -1570,6 +1553,11 @@ kbd {
   border-radius: 13px;
   background: var(--surface-raised);
   box-shadow: var(--shadow-small);
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+}
+
+.appearance-popover button {
   -webkit-app-region: no-drag;
 }
 

@@ -23,6 +23,7 @@ import { SearchPalette } from "./components/SearchPalette";
 import { Sidebar } from "./components/Sidebar";
 import { t } from "./i18n";
 import { api, runningInTauri } from "./lib/api";
+import { applyAppearance, readAppearance, storeAppearance } from "./lib/appearance";
 import { updateTags, wordCount } from "./lib/markdown";
 import type {
   Backlink,
@@ -42,6 +43,7 @@ import type {
 type SaveState = "saved" | "saving" | "error";
 
 export default function App() {
+  const initialAppearance = useRef(readAppearance());
   const [vaults, setVaults] = useState<Vault[]>([]);
   const [notes, setNotes] = useState<NoteSummary[]>([]);
   const [current, setCurrent] = useState<NoteDocument | null>(null);
@@ -62,8 +64,8 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
-  const [theme, setTheme] = useState<ThemeStyle>(() => readStored("theme", "modern"));
-  const [colorMode, setColorMode] = useState<ColorMode>(() => readStored("colorMode", "system"));
+  const [theme, setTheme] = useState<ThemeStyle>(initialAppearance.current.theme);
+  const [colorMode, setColorMode] = useState<ColorMode>(initialAppearance.current.colorMode);
   const [toast, setToast] = useState("");
   const [loading, setLoading] = useState(true);
   const [vaultMenu, setVaultMenu] = useState<{ vault: Vault; x: number; y: number } | null>(null);
@@ -140,11 +142,33 @@ export default function App() {
 
   useEffect(() => {
     const root = window.document.documentElement;
-    root.dataset.theme = theme;
-    root.dataset.colorMode = colorMode;
-    localStorage.setItem("noteharbor:theme", theme);
-    localStorage.setItem("noteharbor:colorMode", colorMode);
+    const systemScheme = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => applyAppearance(root, theme, colorMode, systemScheme.matches);
+    update();
+    storeAppearance(localStorage, theme, colorMode);
+    systemScheme.addEventListener("change", update);
+    return () => systemScheme.removeEventListener("change", update);
   }, [theme, colorMode]);
+
+  const changeTheme = useCallback((nextTheme: ThemeStyle) => {
+    applyAppearance(
+      document.documentElement,
+      nextTheme,
+      colorMode,
+      window.matchMedia("(prefers-color-scheme: dark)").matches
+    );
+    setTheme(nextTheme);
+  }, [colorMode]);
+
+  const changeColorMode = useCallback((nextColorMode: ColorMode) => {
+    applyAppearance(
+      document.documentElement,
+      theme,
+      nextColorMode,
+      window.matchMedia("(prefers-color-scheme: dark)").matches
+    );
+    setColorMode(nextColorMode);
+  }, [theme]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -411,9 +435,10 @@ export default function App() {
   const statusText = saveState === "saving" ? t("saving") : saveState === "error" ? t("saveFailed") : t("saved");
   const activeVault = vaults.find((vault) => vault.id === activeVaultId);
   const totalLines = draft ? draft.split("\n").length : 0;
+  const showRightPanel = Boolean(current && rightPanelOpen);
 
   return (
-    <div className={`app-shell ${sidebarOpen ? "" : "sidebar-closed"} ${rightPanelOpen ? "" : "right-closed"}`}>
+    <div className={`app-shell ${runningInTauri && navigator.platform.toLowerCase().includes("mac") ? "native-macos" : ""} ${sidebarOpen ? "" : "sidebar-closed"} ${showRightPanel ? "" : "right-closed"}`}>
       {sidebarOpen && (
         <Sidebar
           vaults={vaults}
@@ -447,7 +472,14 @@ export default function App() {
           </div>
           <div className="topbar-actions">
             <button className="icon-button" onClick={() => setSearchOpen(true)} title={t("search")}><Search size={17} /></button>
-            <button className="icon-button" onClick={() => setAppearanceOpen((value) => !value)} title={t("appearance")}><Palette size={17} /></button>
+            <button
+              className={`icon-button ${appearanceOpen ? "active" : ""}`}
+              aria-expanded={appearanceOpen}
+              onClick={() => setAppearanceOpen((value) => !value)}
+              title={t("appearance")}
+            >
+              <Palette size={17} />
+            </button>
             {current && (
               <button className={`icon-button ${rightPanelOpen ? "active" : ""}`} onClick={() => setRightPanelOpen((value) => !value)} title={t("outline")}>
                 <PanelRight size={17} />
@@ -458,8 +490,8 @@ export default function App() {
             open={appearanceOpen}
             theme={theme}
             colorMode={colorMode}
-            onThemeChange={setTheme}
-            onColorModeChange={setColorMode}
+            onThemeChange={changeTheme}
+            onColorModeChange={changeColorMode}
             onClose={() => setAppearanceOpen(false)}
           />
         </header>
@@ -662,10 +694,6 @@ function DocumentMenu({ onRename, onDelete }: { onRename: () => void; onDelete: 
 
 function PlusMenuIcon() {
   return <Clock3 size={15} />;
-}
-
-function readStored<T extends string>(key: string, fallback: T): T {
-  return (localStorage.getItem(`noteharbor:${key}`) as T | null) || fallback;
 }
 
 function showError(error: unknown, setter: (value: string) => void) {
