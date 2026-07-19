@@ -1,4 +1,4 @@
-import { FileText, Search, X } from "lucide-react";
+import { FileText, FileType2, Search, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { t } from "../i18n";
 import type { SearchHit, Vault } from "../types";
@@ -56,7 +56,7 @@ export function SearchPalette({
           )}
           {results.map((hit) => (
             <button key={`${hit.vaultId}:${hit.path}`} onClick={() => onSelect(hit)}>
-              <FileText size={17} />
+              {hit.kind && hit.kind !== "markdown" ? <FileType2 className="word-file-icon" size={17} /> : <FileText size={17} />}
               <div>
                 <div className="search-title-line">
                   <strong>{hit.title}</strong>

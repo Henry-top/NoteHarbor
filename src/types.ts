@@ -1,6 +1,8 @@
 export type EditorMode = "source" | "live" | "split";
 export type ThemeStyle = "modern" | "paper" | "glass";
 export type ColorMode = "system" | "light" | "dark";
+export type LibraryItemKind = "markdown" | "docx" | "doc";
+export type WordSyncStatus = "synced" | "sourceMissing" | "outOfSync" | "unlinked" | "syncError";
 
 export interface Vault {
   id: string;
@@ -11,26 +13,41 @@ export interface Vault {
   indexedAt?: string | null;
 }
 
-export interface NoteSummary {
+export interface LibraryItemSummary {
   vaultId: string;
   path: string;
   title: string;
+  kind: LibraryItemKind;
   tags: string[];
   modifiedAt: string;
   isFavorite: boolean;
   isPinned: boolean;
   lastOpened?: string | null;
+  sourcePath?: string | null;
+  sizeBytes?: number;
+  syncStatus?: WordSyncStatus;
+  lastSyncedAt?: string | null;
 }
 
-export interface NoteDocument extends NoteSummary {
+export type NoteSummary = LibraryItemSummary;
+
+export interface NoteDocument extends LibraryItemSummary {
+  kind: "markdown";
   content: string;
   revision: string;
 }
+
+export interface WordDocument extends LibraryItemSummary {
+  kind: "docx" | "doc";
+}
+
+export type OpenItem = NoteDocument | WordDocument;
 
 export interface SearchHit {
   vaultId: string;
   path: string;
   title: string;
+  kind?: LibraryItemKind;
   snippet: string;
   tags: string[];
   score: number;
@@ -87,4 +104,5 @@ export interface OpenTab {
   vaultId: string;
   path: string;
   title: string;
+  kind: LibraryItemKind;
 }

@@ -4,6 +4,8 @@ import {
   ChevronDown,
   ChevronRight,
   FileText,
+  FileType2,
+  Import,
   Folder,
   FolderOpen,
   Heart,
@@ -15,17 +17,18 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { t } from "../i18n";
-import type { NoteSummary, Vault } from "../types";
+import type { LibraryItemSummary, Vault } from "../types";
 
 interface SidebarProps {
   vaults: Vault[];
-  notes: NoteSummary[];
+  items: LibraryItemSummary[];
   activeVaultId?: string;
   activePath?: string;
   indexProgress: Record<string, number>;
-  onSelectNote: (note: NoteSummary) => void;
+  onSelectItem: (item: LibraryItemSummary) => void;
   onActivateVault: (vaultId: string) => void;
   onAddVault: () => void;
+  onImportWord: (vaultId: string) => void;
   onNewNote: (vaultId: string, kind?: "regular" | "daily") => void;
   onSearch: () => void;
   onHide: () => void;
@@ -36,18 +39,19 @@ type TreeNode = {
   name: string;
   path: string;
   folders: Map<string, TreeNode>;
-  notes: NoteSummary[];
+  items: LibraryItemSummary[];
 };
 
 export function Sidebar({
   vaults,
-  notes,
+  items,
   activeVaultId,
   activePath,
   indexProgress,
-  onSelectNote,
+  onSelectItem,
   onActivateVault,
   onAddVault,
+  onImportWord,
   onNewNote,
   onSearch,
   onHide,
@@ -57,7 +61,7 @@ export function Sidebar({
   const [section, setSection] = useState<"all" | "recent" | "favorites" | "pinned">("all");
 
   const filteredNotes = useMemo(() => {
-    const sorted = [...notes];
+    const sorted = [...items];
     if (section === "recent") {
       return sorted
         .filter((note) => note.lastOpened)
@@ -67,7 +71,7 @@ export function Sidebar({
     if (section === "favorites") return sorted.filter((note) => note.isFavorite);
     if (section === "pinned") return sorted.filter((note) => note.isPinned);
     return sorted;
-  }, [notes, section]);
+  }, [items, section]);
 
   const toggle = (key: string) => {
     setCollapsed((current) => {
@@ -97,7 +101,7 @@ export function Sidebar({
       </button>
 
       <nav className="quick-nav" aria-label="笔记筛选">
-        <QuickNav icon={<BookOpen />} label={t("allNotes")} active={section === "all"} onClick={() => setSection("all")} />
+        <QuickNav icon={<BookOpen />} label={t("allContent")} active={section === "all"} onClick={() => setSection("all")} />
         <QuickNav icon={<CalendarDays />} label={t("recent")} active={section === "recent"} onClick={() => setSection("recent")} />
         <QuickNav icon={<Pin />} label={t("pinned")} active={section === "pinned"} onClick={() => setSection("pinned")} />
         <QuickNav icon={<Heart />} label={t("favorites")} active={section === "favorites"} onClick={() => setSection("favorites")} />
@@ -105,6 +109,9 @@ export function Sidebar({
 
       <div className="sidebar-section-heading">
         <span>{t("library")}</span>
+        <button className="icon-button" onClick={() => activeVaultId && onImportWord(activeVaultId)} disabled={!activeVaultId} title={t("importWord")}>
+          <Import size={16} />
+        </button>
         <button className="icon-button" onClick={onAddVault} title={t("addVault")}>
           <Plus size={16} />
         </button>
@@ -153,7 +160,7 @@ export function Sidebar({
                   collapsed={collapsed}
                   toggle={toggle}
                   activePath={activeVaultId === vault.id ? activePath : undefined}
-                  onSelect={onSelectNote}
+                  onSelect={onSelectItem}
                 />
               )}
               {!isCollapsed && vaultNotes.length === 0 && (
@@ -212,7 +219,7 @@ function Tree({
   collapsed: Set<string>;
   toggle: (key: string) => void;
   activePath?: string;
-  onSelect: (note: NoteSummary) => void;
+  onSelect: (item: LibraryItemSummary) => void;
 }) {
   return (
     <div className="note-tree">
@@ -242,35 +249,35 @@ function Tree({
           </div>
         );
       })}
-      {node.notes.map((note) => (
+      {node.items.map((item) => (
         <button
-          className={`tree-note ${activePath === note.path ? "active" : ""}`}
+          className={`tree-note ${activePath === item.path ? "active" : ""}`}
           style={{ paddingLeft: `${34 + depth * 14}px` }}
-          key={`${note.vaultId}:${note.path}`}
-          onClick={() => onSelect(note)}
+          key={`${item.vaultId}:${item.path}`}
+          onClick={() => onSelect(item)}
         >
-          <FileText size={14} />
-          <span>{note.title}</span>
-          {note.isPinned && <Pin className="note-indicator" size={11} />}
+          {item.kind === "markdown" ? <FileText size={14} /> : <FileType2 className="word-file-icon" size={14} />}
+          <span>{item.title}</span>
+          {item.isPinned && <Pin className="note-indicator" size={11} />}
         </button>
       ))}
     </div>
   );
 }
 
-function buildTree(notes: NoteSummary[]): TreeNode {
-  const root: TreeNode = { name: "", path: "", folders: new Map(), notes: [] };
-  for (const note of [...notes].sort((a, b) => a.path.localeCompare(b.path, "zh-CN"))) {
-    const parts = note.path.split("/");
+function buildTree(items: LibraryItemSummary[]): TreeNode {
+  const root: TreeNode = { name: "", path: "", folders: new Map(), items: [] };
+  for (const item of [...items].sort((a, b) => a.path.localeCompare(b.path, "zh-CN"))) {
+    const parts = item.path.split("/");
     let node = root;
     for (const folder of parts.slice(0, -1)) {
       const path = node.path ? `${node.path}/${folder}` : folder;
       if (!node.folders.has(folder)) {
-        node.folders.set(folder, { name: folder, path, folders: new Map(), notes: [] });
+        node.folders.set(folder, { name: folder, path, folders: new Map(), items: [] });
       }
       node = node.folders.get(folder)!;
     }
-    node.notes.push(note);
+    node.items.push(item);
   }
   return root;
 }

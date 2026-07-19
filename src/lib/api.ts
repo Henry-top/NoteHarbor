@@ -4,6 +4,7 @@ import type {
   Backlink,
   HistoryEntry,
   IndexProgress,
+  LibraryItemSummary,
   NoteDocument,
   NoteSummary,
   SaveResult,
@@ -18,7 +19,8 @@ export interface NativeApi {
   listVaults(): Promise<Vault[]>;
   registerVault(path: string): Promise<Vault>;
   removeVault(vaultId: string): Promise<void>;
-  scanVault(vaultId: string): Promise<NoteSummary[]>;
+  scanVault(vaultId: string): Promise<LibraryItemSummary[]>;
+  listLibraryItems(vaultId?: string): Promise<LibraryItemSummary[]>;
   listNotes(vaultId?: string): Promise<NoteSummary[]>;
   createNote(vaultId: string, kind?: "regular" | "daily"): Promise<NoteDocument>;
   readNote(vaultId: string, path: string): Promise<NoteDocument>;
@@ -33,6 +35,13 @@ export interface NativeApi {
   createSnapshot(vaultId: string, path: string, content: string): Promise<void>;
   listHistory(vaultId: string, path: string): Promise<HistoryEntry[]>;
   restoreHistory(historyId: number): Promise<NoteDocument>;
+  importWordDocuments(vaultId: string, sourcePaths: string[]): Promise<LibraryItemSummary[]>;
+  readDocxPreview(vaultId: string, path: string): Promise<number[]>;
+  openLibraryFile(vaultId: string, path: string): Promise<void>;
+  syncLibraryFile(vaultId: string, path: string): Promise<LibraryItemSummary>;
+  relinkLibraryFile(vaultId: string, path: string, sourcePath: string): Promise<LibraryItemSummary>;
+  renameLibraryFile(vaultId: string, path: string, newName: string): Promise<LibraryItemSummary>;
+  deleteLibraryFile(vaultId: string, path: string): Promise<void>;
   onIndexProgress(handler: (progress: IndexProgress) => void): Promise<UnlistenFn>;
   onVaultChanged(handler: (vaultId: string) => void): Promise<UnlistenFn>;
 }
@@ -42,13 +51,22 @@ const tauriApi: NativeApi = {
   registerVault: (path) => invoke("register_vault", { path }),
   removeVault: (vaultId) => invoke("remove_vault", { vaultId }),
   scanVault: (vaultId) => invoke("scan_vault", { vaultId }),
+  listLibraryItems: (vaultId) => invoke("list_library_items", { vaultId }),
   listNotes: (vaultId) => invoke("list_notes", { vaultId }),
-  createNote: (vaultId, kind = "regular") => invoke("create_note", { vaultId, kind }),
-  readNote: (vaultId, path) => invoke("read_note", { vaultId, path }),
-  saveNote: (vaultId, path, content, expectedRevision, force = false) =>
-    invoke("save_note", { vaultId, path, content, expectedRevision, force }),
-  saveCopy: (vaultId, path, content) => invoke("save_copy", { vaultId, path, content }),
-  renameNote: (vaultId, path, newName) => invoke("rename_note", { vaultId, path, newName }),
+  createNote: async (vaultId, kind = "regular") =>
+    normalizeMarkdownDocument(await invoke<NoteDocument>("create_note", { vaultId, kind })),
+  readNote: async (vaultId, path) =>
+    normalizeMarkdownDocument(await invoke<NoteDocument>("read_note", { vaultId, path })),
+  saveNote: async (vaultId, path, content, expectedRevision, force = false) => {
+    const result = await invoke<SaveResult>("save_note", { vaultId, path, content, expectedRevision, force });
+    return result.document
+      ? { ...result, document: normalizeMarkdownDocument(result.document) }
+      : result;
+  },
+  saveCopy: async (vaultId, path, content) =>
+    normalizeMarkdownDocument(await invoke<NoteDocument>("save_copy", { vaultId, path, content })),
+  renameNote: async (vaultId, path, newName) =>
+    normalizeMarkdownDocument(await invoke<NoteDocument>("rename_note", { vaultId, path, newName })),
   deleteNote: (vaultId, path) => invoke("delete_note", { vaultId, path }),
   setNoteFlag: (vaultId, path, flag, value) =>
     invoke("set_note_flag", { vaultId, path, flag, value }),
@@ -59,7 +77,18 @@ const tauriApi: NativeApi = {
   createSnapshot: (vaultId, path, content) =>
     invoke("create_history_snapshot", { vaultId, path, content }),
   listHistory: (vaultId, path) => invoke("list_history", { vaultId, path }),
-  restoreHistory: (historyId) => invoke("restore_history", { historyId }),
+  restoreHistory: async (historyId) =>
+    normalizeMarkdownDocument(await invoke<NoteDocument>("restore_history", { historyId })),
+  importWordDocuments: (vaultId, sourcePaths) =>
+    invoke("import_word_documents", { vaultId, sourcePaths }),
+  readDocxPreview: (vaultId, path) => invoke("read_docx_preview", { vaultId, path }),
+  openLibraryFile: (vaultId, path) => invoke("open_library_file", { vaultId, path }),
+  syncLibraryFile: (vaultId, path) => invoke("sync_library_file", { vaultId, path }),
+  relinkLibraryFile: (vaultId, path, sourcePath) =>
+    invoke("relink_library_file", { vaultId, path, sourcePath }),
+  renameLibraryFile: (vaultId, path, newName) =>
+    invoke("rename_library_file", { vaultId, path, newName }),
+  deleteLibraryFile: (vaultId, path) => invoke("delete_library_file", { vaultId, path }),
   onIndexProgress: async (handler) => listen<IndexProgress>("index://progress", (event) => handler(event.payload)),
   onVaultChanged: async (handler) => listen<{ vaultId: string }>("vault://changed", (event) => handler(event.payload.vaultId))
 };
@@ -107,6 +136,9 @@ const mockApi: NativeApi = {
   },
   async scanVault(vaultId) {
     return mockNotes.filter((note) => note.vaultId === vaultId);
+  },
+  async listLibraryItems(vaultId) {
+    return mockNotes.filter((note) => !vaultId || note.vaultId === vaultId);
   },
   async listNotes(vaultId) {
     return mockNotes.filter((note) => !vaultId || note.vaultId === vaultId);
@@ -179,6 +211,7 @@ const mockApi: NativeApi = {
         vaultId: note.vaultId,
         path: note.path,
         title: note.title,
+        kind: note.kind,
         snippet: splitFrontmatter(note.content).body.replace(/\n/g, " ").slice(0, 120),
         tags: note.tags,
         score: 1
@@ -223,6 +256,27 @@ const mockApi: NativeApi = {
     if (!result.document) throw { code: "RESTORE_FAILED", message: "恢复失败" };
     return result.document;
   },
+  async importWordDocuments() {
+    throw { code: "TAURI_REQUIRED", message: "浏览器预览模式不能导入 Word 文档" };
+  },
+  async readDocxPreview() {
+    throw { code: "TAURI_REQUIRED", message: "浏览器预览模式不能读取 Word 文档" };
+  },
+  async openLibraryFile() {
+    throw { code: "TAURI_REQUIRED", message: "请在桌面应用中使用本地软件打开" };
+  },
+  async syncLibraryFile() {
+    throw { code: "TAURI_REQUIRED", message: "浏览器预览模式不能同步 Word 文档" };
+  },
+  async relinkLibraryFile() {
+    throw { code: "TAURI_REQUIRED", message: "浏览器预览模式不能重新关联 Word 文档" };
+  },
+  async renameLibraryFile() {
+    throw { code: "TAURI_REQUIRED", message: "浏览器预览模式不能重命名 Word 文档" };
+  },
+  async deleteLibraryFile() {
+    throw { code: "TAURI_REQUIRED", message: "浏览器预览模式不能删除 Word 文档" };
+  },
   async onIndexProgress() {
     return () => undefined;
   },
@@ -233,6 +287,10 @@ const mockApi: NativeApi = {
 
 export const api: NativeApi = isTauri() ? tauriApi : mockApi;
 export const runningInTauri = isTauri();
+
+function normalizeMarkdownDocument(document: NoteDocument): NoteDocument {
+  return { ...document, kind: "markdown" };
+}
 
 function mockDocument(
   path: string,
@@ -245,6 +303,7 @@ function mockDocument(
     vaultId,
     path,
     title: titleFromPath(path),
+    kind: "markdown",
     tags: frontmatter.tags,
     modifiedAt: new Date().toISOString(),
     isFavorite: previous?.isFavorite ?? false,

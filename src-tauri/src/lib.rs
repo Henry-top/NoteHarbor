@@ -17,9 +17,18 @@ use tempfile::NamedTempFile;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+mod word_files;
+
+use word_files::{
+    delete_library_file, import_word_documents, open_library_file, read_docx_preview,
+    read_word_document, relink_library_file, rename_library_file, sync_library_file,
+};
+
 struct AppState {
     db: Mutex<Connection>,
     watchers: Mutex<HashMap<String, RecommendedWatcher>>,
+    source_watchers: Mutex<HashMap<String, RecommendedWatcher>>,
+    source_debounce: Mutex<HashMap<String, u64>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,11 +64,56 @@ struct NoteSummary {
     last_opened: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum LibraryItemKind {
+    Markdown,
+    Docx,
+    Doc,
+}
+
+impl LibraryItemKind {
+    fn from_word_path(path: &Path) -> Option<Self> {
+        match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+            "docx" => Some(Self::Docx),
+            "doc" => Some(Self::Doc),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Markdown => "markdown",
+            Self::Docx => "docx",
+            Self::Doc => "doc",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryItemSummary {
+    vault_id: String,
+    path: String,
+    title: String,
+    kind: LibraryItemKind,
+    tags: Vec<String>,
+    modified_at: String,
+    is_favorite: bool,
+    is_pinned: bool,
+    last_opened: Option<String>,
+    source_path: Option<String>,
+    size_bytes: u64,
+    sync_status: String,
+    last_synced_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct NoteDocument {
     #[serde(flatten)]
     summary: NoteSummary,
+    kind: LibraryItemKind,
     content: String,
     revision: String,
 }
@@ -73,6 +127,7 @@ struct SearchHit {
     snippet: String,
     tags: Vec<String>,
     score: f64,
+    kind: LibraryItemKind,
 }
 
 #[derive(Debug, Serialize)]
@@ -146,9 +201,13 @@ fn list_vaults(app: AppHandle, state: State<AppState>) -> AppResult<Vec<Vault>> 
 
 #[tauri::command]
 fn register_vault(app: AppHandle, state: State<AppState>, path: String) -> AppResult<Vault> {
-    let canonical = fs::canonicalize(&path).map_err(|_| app_error("VAULT_NOT_FOUND", "选择的资料库不存在或无法访问"))?;
+    let canonical = fs::canonicalize(&path)
+        .map_err(|_| app_error("VAULT_NOT_FOUND", "选择的资料库不存在或无法访问"))?;
     if !canonical.is_dir() {
-        return Err(app_error("VAULT_NOT_DIRECTORY", "请选择一个文件夹作为资料库"));
+        return Err(app_error(
+            "VAULT_NOT_DIRECTORY",
+            "请选择一个文件夹作为资料库",
+        ));
     }
     let canonical_string = canonical.to_string_lossy().to_string();
     let name = canonical
@@ -186,10 +245,13 @@ fn register_vault(app: AppHandle, state: State<AppState>, path: String) -> AppRe
 
 #[tauri::command]
 fn remove_vault(state: State<AppState>, vault_id: String) -> AppResult<()> {
+    word_files::remove_vault_watchers(&state, &vault_id)?;
     let db = state.db.lock().map_err(lock_error)?;
     db.execute("DELETE FROM notes_fts WHERE vault_id = ?1", [&vault_id])
         .map_err(db_error)?;
     db.execute("DELETE FROM notes WHERE vault_id = ?1", [&vault_id])
+        .map_err(db_error)?;
+    db.execute("DELETE FROM library_files WHERE vault_id = ?1", [&vault_id])
         .map_err(db_error)?;
     db.execute("DELETE FROM vaults WHERE id = ?1", [&vault_id])
         .map_err(db_error)?;
@@ -199,11 +261,16 @@ fn remove_vault(state: State<AppState>, vault_id: String) -> AppResult<()> {
 }
 
 #[tauri::command]
-fn scan_vault(app: AppHandle, state: State<AppState>, vault_id: String) -> AppResult<Vec<NoteSummary>> {
+fn scan_vault(
+    app: AppHandle,
+    state: State<AppState>,
+    vault_id: String,
+) -> AppResult<Vec<LibraryItemSummary>> {
     let vault = get_vault(&state, &vault_id)?;
     if !vault.available {
         return Err(app_error("VAULT_UNAVAILABLE", "资料库当前不可访问"));
     }
+    word_files::reconcile_word_files_for_vault(&app, &state, &vault_id)?;
     let root = PathBuf::from(&vault.path);
     let files: Vec<PathBuf> = WalkDir::new(&root)
         .follow_links(false)
@@ -211,16 +278,34 @@ fn scan_vault(app: AppHandle, state: State<AppState>, vault_id: String) -> AppRe
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
         .map(|entry| entry.into_path())
-        .filter(|path| path.extension().and_then(|value| value.to_str()).is_some_and(|value| value.eq_ignore_ascii_case("md")))
+        .filter(|path| {
+            path.extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| {
+                    value.eq_ignore_ascii_case("md")
+                        || value.eq_ignore_ascii_case("docx")
+                        || value.eq_ignore_ascii_case("doc")
+                })
+        })
         .filter(|path| !is_ignored_path(path, &root))
         .collect();
 
     let total = files.len();
-    let mut found = HashSet::new();
+    let mut found_notes = HashSet::new();
+    let mut found_word_files = HashSet::new();
     for (index, path) in files.iter().enumerate() {
         let relative = relative_string(&root, path)?;
-        found.insert(relative.clone());
-        index_file(&state, &vault_id, &root, path)?;
+        if path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("md"))
+        {
+            found_notes.insert(relative);
+            index_file(&state, &vault_id, &root, path)?;
+        } else {
+            found_word_files.insert(relative);
+            word_files::index_scanned_word_file(&state, &vault_id, &root, path)?;
+        }
         if index % 25 == 0 || index + 1 == total {
             let _ = app.emit(
                 "index://progress",
@@ -246,7 +331,7 @@ fn scan_vault(app: AppHandle, state: State<AppState>, vault_id: String) -> AppRe
             .collect::<Vec<_>>();
         drop(statement);
         for path in existing {
-            if !found.contains(&path) {
+            if !found_notes.contains(&path) {
                 delete_note_index(&db, &vault_id, &path)?;
             }
         }
@@ -256,14 +341,23 @@ fn scan_vault(app: AppHandle, state: State<AppState>, vault_id: String) -> AppRe
         )
         .map_err(db_error)?;
     }
+    word_files::prune_missing_word_files(&state, &vault_id, &found_word_files)?;
 
     ensure_watcher(&app, &state, &vault)?;
-    list_notes_inner(&state, Some(&vault_id))
+    list_library_items_inner(&state, Some(&vault_id))
 }
 
 #[tauri::command]
 fn list_notes(state: State<AppState>, vault_id: Option<String>) -> AppResult<Vec<NoteSummary>> {
     list_notes_inner(&state, vault_id.as_deref())
+}
+
+#[tauri::command]
+fn list_library_items(
+    state: State<AppState>,
+    vault_id: Option<String>,
+) -> AppResult<Vec<LibraryItemSummary>> {
+    list_library_items_inner(&state, vault_id.as_deref())
 }
 
 #[tauri::command]
@@ -275,12 +369,20 @@ fn create_note(state: State<AppState>, vault_id: String, kind: String) -> AppRes
     } else {
         ("", "未命名笔记".to_string())
     };
-    let folder = if directory.is_empty() { root.clone() } else { root.join(directory) };
+    let folder = if directory.is_empty() {
+        root.clone()
+    } else {
+        root.join(directory)
+    };
     fs::create_dir_all(&folder).map_err(io_error)?;
 
     let mut counter = 0;
     let path = loop {
-        let suffix = if counter == 0 { String::new() } else { format!(" {}", counter + 1) };
+        let suffix = if counter == 0 {
+            String::new()
+        } else {
+            format!(" {}", counter + 1)
+        };
         let candidate = folder.join(format!("{base_name}{suffix}.md"));
         if !candidate.exists() || kind == "daily" {
             break candidate;
@@ -353,15 +455,29 @@ fn save_note(
 }
 
 #[tauri::command]
-fn save_copy(state: State<AppState>, vault_id: String, path: String, content: String) -> AppResult<NoteDocument> {
+fn save_copy(
+    state: State<AppState>,
+    vault_id: String,
+    path: String,
+    content: String,
+) -> AppResult<NoteDocument> {
     let vault = get_vault(&state, &vault_id)?;
     let root = PathBuf::from(&vault.path);
     let original = safe_note_path(&root, &path)?;
-    let parent = original.parent().ok_or_else(|| app_error("INVALID_PATH", "笔记路径无效"))?;
-    let stem = original.file_stem().and_then(|value| value.to_str()).unwrap_or("笔记");
+    let parent = original
+        .parent()
+        .ok_or_else(|| app_error("INVALID_PATH", "笔记路径无效"))?;
+    let stem = original
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("笔记");
     let mut counter = 1;
     let copy = loop {
-        let suffix = if counter == 1 { " - 副本".to_string() } else { format!(" - 副本 {counter}") };
+        let suffix = if counter == 1 {
+            " - 副本".to_string()
+        } else {
+            format!(" - 副本 {counter}")
+        };
         let candidate = parent.join(format!("{stem}{suffix}.md"));
         if !candidate.exists() {
             break candidate;
@@ -384,12 +500,18 @@ fn rename_note(
     let vault = get_vault(&state, &vault_id)?;
     let root = PathBuf::from(&vault.path);
     let old_absolute = safe_note_path(&root, &path)?;
-    let parent = old_absolute.parent().ok_or_else(|| app_error("INVALID_PATH", "笔记路径无效"))?;
+    let parent = old_absolute
+        .parent()
+        .ok_or_else(|| app_error("INVALID_PATH", "笔记路径无效"))?;
     let new_absolute = parent.join(format!("{cleaned}.md"));
     if new_absolute.exists() {
         return Err(app_error("NOTE_ALREADY_EXISTS", "同名笔记已经存在"));
     }
-    let old_title = old_absolute.file_stem().and_then(|value| value.to_str()).unwrap_or_default().to_string();
+    let old_title = old_absolute
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_string();
     let new_title = cleaned.clone();
     let old_relative = relative_string(&root, &old_absolute)?;
     let new_relative = relative_string(&root, &new_absolute)?;
@@ -399,7 +521,11 @@ fn rename_note(
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
         .map(|entry| entry.into_path())
-        .filter(|file| file.extension().and_then(|value| value.to_str()).is_some_and(|value| value.eq_ignore_ascii_case("md")))
+        .filter(|file| {
+            file.extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("md"))
+        })
         .collect();
 
     let mut changes = Vec::new();
@@ -426,7 +552,11 @@ fn rename_note(
 
     let mut written: Vec<(PathBuf, String)> = Vec::new();
     for (file, original, updated) in &changes {
-        let target = if file == &old_absolute { &new_absolute } else { file };
+        let target = if file == &old_absolute {
+            &new_absolute
+        } else {
+            file
+        };
         if let Err(error) = atomic_write(target, updated) {
             for (changed_path, backup) in written.iter().rev() {
                 let _ = atomic_write(changed_path, backup);
@@ -443,7 +573,11 @@ fn rename_note(
     }
     index_file(&state, &vault_id, &root, &new_absolute)?;
     for (file, _, _) in &changes {
-        let target = if file == &old_absolute { &new_absolute } else { file };
+        let target = if file == &old_absolute {
+            &new_absolute
+        } else {
+            file
+        };
         index_file(&state, &vault_id, &root, target)?;
     }
     read_note_inner(&state, &vault_id, &new_relative)
@@ -453,7 +587,8 @@ fn rename_note(
 fn delete_note(state: State<AppState>, vault_id: String, path: String) -> AppResult<()> {
     let vault = get_vault(&state, &vault_id)?;
     let absolute = safe_note_path(Path::new(&vault.path), &path)?;
-    trash::delete(&absolute).map_err(|error| app_error("TRASH_FAILED", format!("无法移到废纸篓：{error}")))?;
+    trash::delete(&absolute)
+        .map_err(|error| app_error("TRASH_FAILED", format!("无法移到废纸篓：{error}")))?;
     let db = state.db.lock().map_err(lock_error)?;
     delete_note_index(&db, &vault_id, &path)
 }
@@ -472,12 +607,15 @@ fn set_note_flag(
         _ => return Err(app_error("INVALID_FLAG", "不支持的笔记标记")),
     };
     let sql = format!("UPDATE notes SET {column} = ?1 WHERE vault_id = ?2 AND path = ?3");
-    state
+    let changed = state
         .db
         .lock()
         .map_err(lock_error)?
         .execute(&sql, params![value as i64, vault_id, path])
         .map_err(db_error)?;
+    if changed == 0 {
+        word_files::set_word_flag(&state, &vault_id, &path, column, value)?;
+    }
     Ok(())
 }
 
@@ -519,6 +657,7 @@ fn search_notes(
                 snippet: row.get(3)?,
                 tags: serde_json::from_str(&tags_json).unwrap_or_default(),
                 score: row.get::<_, f64>(5)?.abs(),
+                kind: LibraryItemKind::Markdown,
             })
         })
         .map_err(db_error)?
@@ -544,9 +683,10 @@ fn search_notes(
                     vault_id: row.get(0)?,
                     path: row.get(1)?,
                     title: row.get(2)?,
-                snippet: strip_frontmatter(&row.get::<_, String>(3)?).replace('\n', " "),
+                    snippet: strip_frontmatter(&row.get::<_, String>(3)?).replace('\n', " "),
                     tags: serde_json::from_str(&tags_json).unwrap_or_default(),
                     score: 1.0,
+                    kind: LibraryItemKind::Markdown,
                 })
             })
             .map_err(db_error)?
@@ -554,11 +694,39 @@ fn search_notes(
             .filter(|hit| allowed.is_empty() || allowed.contains(&hit.vault_id))
             .collect();
     }
+    drop(statement);
+    drop(db);
+    hits.extend(word_files::search_word_items(&state, query, &allowed)?);
+    let normalized_query = query.to_lowercase();
+    hits.sort_by(|left, right| {
+        let left_title = left.title.to_lowercase();
+        let right_title = right.title.to_lowercase();
+        let rank = |title: &str, kind: LibraryItemKind| {
+            (
+                title == normalized_query,
+                title.starts_with(&normalized_query),
+                title.contains(&normalized_query),
+                kind != LibraryItemKind::Markdown,
+            )
+        };
+        rank(&right_title, right.kind)
+            .cmp(&rank(&left_title, left.kind))
+            .then_with(|| {
+                left.score
+                    .partial_cmp(&right.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    hits.truncate(100);
     Ok(hits)
 }
 
 #[tauri::command]
-fn get_backlinks(state: State<AppState>, vault_id: String, path: String) -> AppResult<Vec<Backlink>> {
+fn get_backlinks(
+    state: State<AppState>,
+    vault_id: String,
+    path: String,
+) -> AppResult<Vec<Backlink>> {
     let title = Path::new(&path)
         .file_stem()
         .and_then(|value| value.to_str())
@@ -575,7 +743,12 @@ fn get_backlinks(state: State<AppState>, vault_id: String, path: String) -> AppR
         .map_err(db_error)?;
     let rows = statement
         .query_map(
-            params![vault_id, path, format!("%{wiki_pattern}%"), format!("%{file_pattern}%")],
+            params![
+                vault_id,
+                path,
+                format!("%{wiki_pattern}%"),
+                format!("%{file_pattern}%")
+            ],
             |row| {
                 let source_path: String = row.get(0)?;
                 let source_title: String = row.get(1)?;
@@ -611,7 +784,11 @@ fn import_attachment(
     let extension = Path::new(&original_name)
         .extension()
         .and_then(|value| value.to_str())
-        .filter(|value| value.chars().all(|character| character.is_ascii_alphanumeric()))
+        .filter(|value| {
+            value
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric())
+        })
         .unwrap_or("bin")
         .to_lowercase();
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
@@ -635,7 +812,11 @@ fn create_history_snapshot(
 }
 
 #[tauri::command]
-fn list_history(state: State<AppState>, vault_id: String, path: String) -> AppResult<Vec<HistoryEntry>> {
+fn list_history(
+    state: State<AppState>,
+    vault_id: String,
+    path: String,
+) -> AppResult<Vec<HistoryEntry>> {
     let db = state.db.lock().map_err(lock_error)?;
     let mut statement = db
         .prepare(
@@ -686,8 +867,10 @@ fn restore_history(state: State<AppState>, history_id: i64) -> AppResult<NoteDoc
 
 fn init_database(path: &Path) -> AppResult<Connection> {
     let db = Connection::open(path).map_err(db_error)?;
-    db.pragma_update(None, "journal_mode", "WAL").map_err(db_error)?;
-    db.pragma_update(None, "foreign_keys", "ON").map_err(db_error)?;
+    db.pragma_update(None, "journal_mode", "WAL")
+        .map_err(db_error)?;
+    db.pragma_update(None, "foreign_keys", "ON")
+        .map_err(db_error)?;
     db.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS vaults (
@@ -735,6 +918,7 @@ fn init_database(path: &Path) -> AppResult<Connection> {
         ",
     )
     .map_err(db_error)?;
+    word_files::init_library_files_schema(&db)?;
     Ok(db)
 }
 
@@ -742,10 +926,10 @@ fn query_vaults(state: &AppState) -> AppResult<Vec<Vault>> {
     let db = state.db.lock().map_err(lock_error)?;
     let mut statement = db
         .prepare(
-            "SELECT v.id, v.name, v.path, v.indexed_at, COUNT(n.path)
+            "SELECT v.id, v.name, v.path, v.indexed_at,
+                    (SELECT COUNT(*) FROM notes n WHERE n.vault_id = v.id)
+                    + (SELECT COUNT(*) FROM library_files f WHERE f.vault_id = v.id)
              FROM vaults v
-             LEFT JOIN notes n ON n.vault_id = v.id
-             GROUP BY v.id
              ORDER BY v.rowid",
         )
         .map_err(db_error)?;
@@ -770,9 +954,10 @@ fn query_vaults(state: &AppState) -> AppResult<Vec<Vault>> {
 fn get_vault(state: &AppState, id: &str) -> AppResult<Vault> {
     let db = state.db.lock().map_err(lock_error)?;
     db.query_row(
-        "SELECT v.id, v.name, v.path, v.indexed_at, COUNT(n.path)
-         FROM vaults v LEFT JOIN notes n ON n.vault_id = v.id
-         WHERE v.id = ?1 GROUP BY v.id",
+        "SELECT v.id, v.name, v.path, v.indexed_at,
+                (SELECT COUNT(*) FROM notes n WHERE n.vault_id = v.id)
+                + (SELECT COUNT(*) FROM library_files f WHERE f.vault_id = v.id)
+         FROM vaults v WHERE v.id = ?1",
         [id],
         |row| {
             let path: String = row.get(2)?;
@@ -838,6 +1023,50 @@ fn list_notes_inner(state: &AppState, vault_id: Option<&str>) -> AppResult<Vec<N
     Ok(notes)
 }
 
+fn list_library_items_inner(
+    state: &AppState,
+    vault_id: Option<&str>,
+) -> AppResult<Vec<LibraryItemSummary>> {
+    let vault_roots = query_vaults(state)?
+        .into_iter()
+        .map(|vault| (vault.id, PathBuf::from(vault.path)))
+        .collect::<HashMap<_, _>>();
+    let mut items = list_notes_inner(state, vault_id)?
+        .into_iter()
+        .map(|note| {
+            let size_bytes = vault_roots
+                .get(&note.vault_id)
+                .and_then(|root| fs::metadata(root.join(&note.path)).ok())
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            LibraryItemSummary {
+                vault_id: note.vault_id,
+                path: note.path,
+                title: note.title,
+                kind: LibraryItemKind::Markdown,
+                tags: note.tags,
+                modified_at: note.modified_at,
+                is_favorite: note.is_favorite,
+                is_pinned: note.is_pinned,
+                last_opened: note.last_opened,
+                source_path: None,
+                size_bytes,
+                sync_status: "unlinked".into(),
+                last_synced_at: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    items.extend(word_files::list_word_items_inner(state, vault_id)?);
+    items.sort_by(|left, right| {
+        right
+            .is_pinned
+            .cmp(&left.is_pinned)
+            .then_with(|| right.modified_at.cmp(&left.modified_at))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(items)
+}
+
 fn read_note_inner(state: &AppState, vault_id: &str, path: &str) -> AppResult<NoteDocument> {
     let vault = get_vault(state, vault_id)?;
     let absolute = safe_note_path(Path::new(&vault.path), path)?;
@@ -867,6 +1096,7 @@ fn read_note_inner(state: &AppState, vault_id: &str, path: &str) -> AppResult<No
             is_pinned: pinned != 0,
             last_opened,
         },
+        kind: LibraryItemKind::Markdown,
         revision: revision(&content),
         content,
     })
@@ -881,7 +1111,8 @@ fn index_file(state: &AppState, vault_id: &str, root: &Path, path: &Path) -> App
     let modified_at = modified_iso(&metadata);
     let tags = parse_frontmatter(&content).tags;
     let searchable_content = strip_frontmatter(&content);
-    let tags_json = serde_json::to_string(&tags).map_err(|error| app_error("SERIALIZE_FAILED", error.to_string()))?;
+    let tags_json = serde_json::to_string(&tags)
+        .map_err(|error| app_error("SERIALIZE_FAILED", error.to_string()))?;
     let hash = revision(&content);
     let key = format!("{vault_id}:{relative}");
     let db = state.db.lock().map_err(lock_error)?;
@@ -904,7 +1135,14 @@ fn index_file(state: &AppState, vault_id: &str, root: &Path, path: &Path) -> App
     db.execute(
         "INSERT INTO notes_fts (note_key, vault_id, path, title, content, tags)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![key, vault_id, relative, title, searchable_content, tags_json],
+        params![
+            key,
+            vault_id,
+            relative,
+            title,
+            searchable_content,
+            tags_json
+        ],
     )
     .map_err(db_error)?;
     Ok(())
@@ -930,15 +1168,21 @@ fn ensure_watcher(app: &AppHandle, state: &State<AppState>, vault: &Vault) -> Ap
     let app_handle = app.clone();
     let vault_id = vault.id.clone();
     let callback_vault_id = vault_id.clone();
+    let callback_root = PathBuf::from(&vault.path);
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-        if result.is_ok() {
-            let _ = app_handle.emit(
-                "vault://changed",
-                VaultChanged {
-                    vault_id: callback_vault_id.clone(),
-                },
-            );
+        let Ok(event) = result else {
+            return;
+        };
+        let state = app_handle.state::<AppState>();
+        for path in &event.paths {
+            let _ = index_changed_vault_path(&state, &callback_vault_id, &callback_root, path);
         }
+        let _ = app_handle.emit(
+            "vault://changed",
+            VaultChanged {
+                vault_id: callback_vault_id.clone(),
+            },
+        );
     })
     .map_err(|error| app_error("WATCHER_FAILED", format!("无法监听资料库：{error}")))?;
     watcher
@@ -948,7 +1192,48 @@ fn ensure_watcher(app: &AppHandle, state: &State<AppState>, vault: &Vault) -> Ap
     Ok(())
 }
 
-fn create_snapshot_inner(state: &AppState, vault_id: &str, path: &str, content: &str) -> AppResult<()> {
+fn index_changed_vault_path(
+    state: &AppState,
+    vault_id: &str,
+    root: &Path,
+    path: &Path,
+) -> AppResult<()> {
+    if path.strip_prefix(root).is_err() || is_ignored_path(path, root) {
+        return Ok(());
+    }
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if !extension.eq_ignore_ascii_case("md")
+        && !extension.eq_ignore_ascii_case("docx")
+        && !extension.eq_ignore_ascii_case("doc")
+    {
+        return Ok(());
+    }
+    if path.is_file() {
+        if extension.eq_ignore_ascii_case("md") {
+            index_file(state, vault_id, root, path)
+        } else {
+            word_files::index_scanned_word_file(state, vault_id, root, path)
+        }
+    } else {
+        let relative = relative_string(root, path)?;
+        if extension.eq_ignore_ascii_case("md") {
+            let db = state.db.lock().map_err(lock_error)?;
+            delete_note_index(&db, vault_id, &relative)
+        } else {
+            word_files::remove_scanned_word_path(state, vault_id, &relative)
+        }
+    }
+}
+
+fn create_snapshot_inner(
+    state: &AppState,
+    vault_id: &str,
+    path: &str,
+    content: &str,
+) -> AppResult<()> {
     let hash = revision(content);
     let now = Utc::now();
     let mut db = state.db.lock().map_err(lock_error)?;
@@ -996,11 +1281,17 @@ fn create_snapshot_inner(state: &AppState, vault_id: &str, path: &str, content: 
     transaction
         .execute(
             "DELETE FROM history WHERE created_unix < ?1",
-            [now.checked_sub_signed(Duration::days(30)).unwrap_or(now).timestamp()],
+            [now.checked_sub_signed(Duration::days(30))
+                .unwrap_or(now)
+                .timestamp()],
         )
         .map_err(db_error)?;
     let total: i64 = transaction
-        .query_row("SELECT COALESCE(SUM(byte_size), 0) FROM history", [], |row| row.get(0))
+        .query_row(
+            "SELECT COALESCE(SUM(byte_size), 0) FROM history",
+            [],
+            |row| row.get(0),
+        )
         .map_err(db_error)?;
     if total > 1024 * 1024 * 1024 {
         let excess = total - 1024 * 1024 * 1024;
@@ -1031,9 +1322,17 @@ fn replace_links(
     old_title: &str,
     new_title: &str,
 ) -> String {
-    let wiki = Regex::new(&format!(r"\[\[{}(?P<tail>\||\]\])", regex::escape(old_title))).ok();
+    let wiki = Regex::new(&format!(
+        r"\[\[{}(?P<tail>\||\]\])",
+        regex::escape(old_title)
+    ))
+    .ok();
     let mut updated = wiki
-        .map(|pattern| pattern.replace_all(content, format!("[[{new_title}$tail")).to_string())
+        .map(|pattern| {
+            pattern
+                .replace_all(content, format!("[[{new_title}$tail"))
+                .to_string()
+        })
         .unwrap_or_else(|| content.to_string());
     if let Some(parent) = source_file.parent() {
         if let (Some(old_relative), Some(new_relative)) = (
@@ -1074,14 +1373,21 @@ fn strip_frontmatter(content: &str) -> &str {
 }
 
 fn atomic_write(path: &Path, content: &str) -> AppResult<()> {
-    let parent = path.parent().ok_or_else(|| app_error("INVALID_PATH", "文件路径无效"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| app_error("INVALID_PATH", "文件路径无效"))?;
     fs::create_dir_all(parent).map_err(io_error)?;
-    let permissions = fs::metadata(path).ok().map(|metadata| metadata.permissions());
+    let permissions = fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
     let mut temporary = NamedTempFile::new_in(parent).map_err(io_error)?;
     temporary.write_all(content.as_bytes()).map_err(io_error)?;
     temporary.as_file().sync_all().map_err(io_error)?;
     if let Some(permissions) = permissions {
-        temporary.as_file().set_permissions(permissions).map_err(io_error)?;
+        temporary
+            .as_file()
+            .set_permissions(permissions)
+            .map_err(io_error)?;
     }
     temporary
         .persist(path)
@@ -1092,13 +1398,20 @@ fn atomic_write(path: &Path, content: &str) -> AppResult<()> {
 fn safe_note_path(root: &Path, relative: &str) -> AppResult<PathBuf> {
     let path = Path::new(relative);
     if path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
     {
         return Err(app_error("INVALID_PATH", "笔记路径不能离开资料库"));
     }
-    if !path.extension().and_then(|value| value.to_str()).is_some_and(|value| value.eq_ignore_ascii_case("md")) {
+    if !path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("md"))
+    {
         return Err(app_error("INVALID_PATH", "笔记必须是 Markdown 文件"));
     }
     Ok(root.join(path))
@@ -1109,22 +1422,25 @@ fn sanitize_note_name(value: &str) -> AppResult<String> {
     if cleaned.is_empty()
         || cleaned == "."
         || cleaned == ".."
-        || cleaned.chars().any(|character| ['/', '\\', ':', '\0'].contains(&character))
+        || cleaned
+            .chars()
+            .any(|character| ['/', '\\', ':', '\0'].contains(&character))
     {
-        return Err(app_error("INVALID_NOTE_NAME", "笔记名称不能为空，也不能包含路径字符"));
+        return Err(app_error(
+            "INVALID_NOTE_NAME",
+            "笔记名称不能为空，也不能包含路径字符",
+        ));
     }
     Ok(cleaned.to_string())
 }
 
 fn is_ignored_path(path: &Path, root: &Path) -> bool {
-    path.strip_prefix(root)
-        .ok()
-        .is_some_and(|relative| {
-            relative.components().any(|component| {
-                component.as_os_str().to_string_lossy().starts_with('.')
-                    || component.as_os_str() == "node_modules"
-            })
+    path.strip_prefix(root).ok().is_some_and(|relative| {
+        relative.components().any(|component| {
+            component.as_os_str().to_string_lossy().starts_with('.')
+                || component.as_os_str() == "node_modules"
         })
+    })
 }
 
 fn relative_string(root: &Path, path: &Path) -> AppResult<String> {
@@ -1191,6 +1507,7 @@ fn lock_error<T>(_: std::sync::PoisonError<T>) -> AppError {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let app_data = app.path().app_data_dir()?;
             fs::create_dir_all(&app_data)?;
@@ -1199,7 +1516,11 @@ pub fn run() {
             app.manage(AppState {
                 db: Mutex::new(db),
                 watchers: Mutex::new(HashMap::new()),
+                source_watchers: Mutex::new(HashMap::new()),
+                source_debounce: Mutex::new(HashMap::new()),
             });
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || word_files::startup_reconcile(app_handle));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1208,6 +1529,7 @@ pub fn run() {
             remove_vault,
             scan_vault,
             list_notes,
+            list_library_items,
             create_note,
             read_note,
             save_note,
@@ -1220,7 +1542,15 @@ pub fn run() {
             import_attachment,
             create_history_snapshot,
             list_history,
-            restore_history
+            restore_history,
+            import_word_documents,
+            read_docx_preview,
+            read_word_document,
+            open_library_file,
+            sync_library_file,
+            relink_library_file,
+            rename_library_file,
+            delete_library_file
         ])
         .run(tauri::generate_context!())
         .expect("failed to run NoteHarbor");
@@ -1270,6 +1600,8 @@ mod tests {
         let state = AppState {
             db: Mutex::new(init_database(&database).unwrap()),
             watchers: Mutex::new(HashMap::new()),
+            source_watchers: Mutex::new(HashMap::new()),
+            source_debounce: Mutex::new(HashMap::new()),
         };
         state
             .db
@@ -1294,6 +1626,51 @@ mod tests {
         assert_eq!(notes[0].tags, vec!["灵感", "项目"]);
         let document = read_note_inner(&state, "vault", "想法.md").unwrap();
         assert!(document.content.contains("保持简单"));
+    }
+
+    #[test]
+    fn watcher_index_helper_adds_and_removes_markdown_and_word_files() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("vault");
+        fs::create_dir_all(root.join("documents")).unwrap();
+        let state = AppState {
+            db: Mutex::new(init_database(&temporary.path().join("watcher.sqlite")).unwrap()),
+            watchers: Mutex::new(HashMap::new()),
+            source_watchers: Mutex::new(HashMap::new()),
+            source_debounce: Mutex::new(HashMap::new()),
+        };
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO vaults (id, name, path) VALUES ('vault', '测试', ?1)",
+                [root.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+
+        let markdown = root.join("运行期.md");
+        fs::write(&markdown, "# 运行期加入").unwrap();
+        index_changed_vault_path(&state, "vault", &root, &markdown).unwrap();
+        assert_eq!(list_notes_inner(&state, Some("vault")).unwrap().len(), 1);
+
+        let word = root.join("documents/运行期.doc");
+        fs::write(&word, b"legacy doc").unwrap();
+        index_changed_vault_path(&state, "vault", &root, &word).unwrap();
+        assert_eq!(
+            word_files::list_word_items_inner(&state, Some("vault"))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        fs::remove_file(&markdown).unwrap();
+        fs::remove_file(&word).unwrap();
+        index_changed_vault_path(&state, "vault", &root, &markdown).unwrap();
+        index_changed_vault_path(&state, "vault", &root, &word).unwrap();
+        assert!(list_library_items_inner(&state, Some("vault"))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
