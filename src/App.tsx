@@ -26,6 +26,7 @@ import { DocxPreview } from "./components/DocxPreview";
 import { EditorPane } from "./components/EditorPane";
 import { HelpCenter } from "./components/HelpCenter";
 import { HoverTip } from "./components/HoverTip";
+import { InlineTitleEditor } from "./components/InlineTitleEditor";
 import { ItemContextMenu } from "./components/ItemContextMenu";
 import { MarkdownPreview } from "./components/MarkdownPreview";
 import { ModeSwitcher } from "./components/ModeSwitcher";
@@ -533,9 +534,9 @@ export default function App() {
     }
   }
 
-  async function renameCurrent(nextName: string) {
-    const target = renameTarget;
-    if (!target) return;
+  async function renameCurrent(nextName: string, targetOverride?: OpenItem, inline = false) {
+    const target = targetOverride ?? renameTarget;
+    if (!target) return false;
     const active = currentRef.current;
     const targetIsCurrent = active?.vaultId === target.vaultId && active.path === target.path;
     if (targetIsCurrent) {
@@ -604,8 +605,12 @@ export default function App() {
       setRenameTarget(null);
       setToast(`已重命名为“${renamed.title}”`);
       await refreshItems();
+      return true;
     } catch (error) {
-      setRenameError(errorMessage(error));
+      const message = errorMessage(error);
+      setRenameError(message);
+      if (inline) setToast(message);
+      return false;
     } finally {
       if (targetIsCurrent) renameActiveRef.current = false;
       setRenameBusy(false);
@@ -979,7 +984,14 @@ export default function App() {
           <>
             <div className="document-toolbar">
               <div className="document-title">
-                <h1>{current.title}</h1>
+                <InlineTitleEditor
+                  key={`${current.vaultId}:${current.path}`}
+                  title={current.title}
+                  kind={current.kind}
+                  busy={renameBusy}
+                  error={renameError}
+                  onRename={(name) => renameCurrent(name, current, true)}
+                />
                 {current.kind === "markdown" ? (
                   <span className={`save-status ${saveState}`}>{statusText}</span>
                 ) : (

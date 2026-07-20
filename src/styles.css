@@ -762,15 +762,47 @@ kbd {
   gap: 10px;
 }
 
-.document-title h1 {
+.document-title-button {
   max-width: 440px;
-  margin: 0;
+  min-width: 0;
+  margin: 0 0 0 -5px;
+  padding: 4px 5px;
+  border: 0;
+  border-radius: 6px;
   overflow: hidden;
   color: var(--text-strong);
+  background: transparent;
   font-size: 14px;
   font-weight: 650;
+  line-height: 1.25;
+  text-align: left;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+.document-title-button:hover,
+.document-title-button:focus-visible {
+  background: var(--surface-hover);
+}
+
+.document-title-input {
+  width: min(440px, 52vw);
+  height: 30px;
+  margin-left: -5px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--accent) 68%, var(--border-strong));
+  border-radius: 7px;
+  outline: none;
+  color: var(--text-strong);
+  background: var(--surface-raised);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.document-title-input[aria-invalid="true"] {
+  border-color: #c15b4f;
 }
 
 .save-status {
@@ -2327,12 +2359,15 @@ kbd {
 }
 
 :root[data-theme="glass"] .appearance-popover {
-  border-color: color-mix(in srgb, white 46%, var(--border-strong));
-  background: color-mix(in srgb, var(--surface-raised) 82%, transparent);
-  box-shadow:
-    0 22px 58px rgba(24, 48, 63, 0.25),
-    inset 0 1px 0 rgba(255, 255, 255, 0.42);
-  backdrop-filter: blur(38px) saturate(1.55);
+  border-color: rgba(113, 143, 158, 0.3);
+  background: #f8fbfc;
+  box-shadow: 0 22px 58px rgba(24, 48, 63, 0.22);
+  backdrop-filter: none;
+}
+
+:root[data-theme="glass"][data-effective-color-mode="dark"] .appearance-popover {
+  border-color: rgba(151, 174, 185, 0.22);
+  background: #263139;
 }
 
 .appearance-popover button {
