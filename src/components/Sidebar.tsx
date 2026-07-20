@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { t } from "../i18n";
+import { HoverTip } from "./HoverTip";
 import type { LibraryItemSummary, Vault } from "../types";
 
 interface SidebarProps {
@@ -61,6 +62,7 @@ export function Sidebar({
 }: SidebarProps) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [section, setSection] = useState<"all" | "recent" | "favorites" | "pinned">("all");
+  const primaryShortcut = navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl+";
 
   const filteredNotes = useMemo(() => {
     const sorted = [...items];
@@ -91,9 +93,11 @@ export function Sidebar({
           <span />
         </div>
         <strong>{t("appName")}</strong>
-        <button className="icon-button sidebar-hide" onClick={onHide} title="隐藏侧栏">
-          <PanelLeftClose size={17} />
-        </button>
+        <HoverTip label="隐藏侧栏" detail="收起资料库和文件列表" shortcut={`${primaryShortcut}\\`}>
+          <button className="icon-button sidebar-hide" onClick={onHide}>
+            <PanelLeftClose size={17} />
+          </button>
+        </HoverTip>
       </div>
 
       <button className="search-trigger" onClick={onSearch}>
@@ -111,12 +115,16 @@ export function Sidebar({
 
       <div className="sidebar-section-heading">
         <span>{t("library")}</span>
-        <button className="icon-button" onClick={() => activeVaultId && onImportWord(activeVaultId)} disabled={!activeVaultId} title={t("importWord")}>
-          <Import size={16} />
-        </button>
-        <button className="icon-button" onClick={onAddVault} title={t("addVault")}>
-          <Plus size={16} />
-        </button>
+        <HoverTip label="导入 Word 文档" detail="复制到当前资料库并保留外部原文件">
+          <button className="icon-button" onClick={() => activeVaultId && onImportWord(activeVaultId)} disabled={!activeVaultId}>
+            <Import size={16} />
+          </button>
+        </HoverTip>
+        <HoverTip label="添加资料库" detail="登记一个本地文件夹">
+          <button className="icon-button" onClick={onAddVault}>
+            <Plus size={16} />
+          </button>
+        </HoverTip>
       </div>
 
       <div className="vault-list">
@@ -148,6 +156,7 @@ export function Sidebar({
                     onVaultMenu(vault, event.currentTarget);
                   }}
                   aria-label="资料库菜单"
+                  title="资料库操作"
                 >
                   <MoreHorizontal size={15} />
                 </button>

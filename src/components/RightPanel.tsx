@@ -43,14 +43,14 @@ export function RightPanel({
     <aside className="right-panel">
       <div className="right-panel-header">
         <div className="right-tabs">
-          <button className={section === "outline" ? "active" : ""} onClick={() => setSection("outline")} title={t("outline")}>
+          <button className={section === "outline" ? "active" : ""} onClick={() => setSection("outline")} title="大纲：按标题快速浏览当前笔记">
             <ListTree size={16} />
           </button>
-          <button className={section === "backlinks" ? "active" : ""} onClick={() => setSection("backlinks")} title={t("backlinks")}>
+          <button className={section === "backlinks" ? "active" : ""} onClick={() => setSection("backlinks")} title="反向链接：查看哪些笔记链接到这里">
             <Link2 size={16} />
             {backlinks.length > 0 && <span>{backlinks.length}</span>}
           </button>
-          <button className={section === "history" ? "active" : ""} onClick={() => setSection("history")} title={t("history")}>
+          <button className={section === "history" ? "active" : ""} onClick={() => setSection("history")} title="历史版本：查看并恢复自动快照">
             <Clock3 size={16} />
           </button>
         </div>

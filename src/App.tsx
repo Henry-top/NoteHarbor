@@ -1,4 +1,5 @@
 import {
+  CircleHelp,
   Clock3,
   Command,
   ExternalLink,
@@ -23,9 +24,12 @@ import { ConflictDialog } from "./components/ConflictDialog";
 import { DeleteItemDialog } from "./components/DeleteItemDialog";
 import { DocxPreview } from "./components/DocxPreview";
 import { EditorPane } from "./components/EditorPane";
+import { HelpCenter } from "./components/HelpCenter";
+import { HoverTip } from "./components/HoverTip";
 import { ItemContextMenu } from "./components/ItemContextMenu";
 import { MarkdownPreview } from "./components/MarkdownPreview";
 import { ModeSwitcher } from "./components/ModeSwitcher";
+import { OnboardingTour } from "./components/OnboardingTour";
 import { RenameDialog } from "./components/RenameDialog";
 import { RightPanel } from "./components/RightPanel";
 import { SearchPalette } from "./components/SearchPalette";
@@ -33,6 +37,7 @@ import { Sidebar } from "./components/Sidebar";
 import { t } from "./i18n";
 import { api, runningInTauri } from "./lib/api";
 import { applyAppearance, readAppearance, storeAppearance } from "./lib/appearance";
+import { completeOnboarding, shouldShowOnboarding } from "./lib/help";
 import { updateTags, wordCount } from "./lib/markdown";
 import { platformFileLabels } from "./lib/platform";
 import type {
@@ -75,6 +80,8 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [theme, setTheme] = useState<ThemeStyle>(initialAppearance.current.theme);
   const [colorMode, setColorMode] = useState<ColorMode>(initialAppearance.current.colorMode);
   const [toast, setToast] = useState("");
@@ -94,6 +101,7 @@ export default function App() {
   const operationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const autoSaveTimerRef = useRef<number | null>(null);
   const renameActiveRef = useRef(false);
+  const onboardingCheckedRef = useRef(false);
   const saveNowRef = useRef<(
     document: NoteDocument,
     content: string,
@@ -198,6 +206,12 @@ export default function App() {
     return () => systemScheme.removeEventListener("change", update);
   }, [theme, colorMode]);
 
+  useEffect(() => {
+    if (loading || onboardingCheckedRef.current) return;
+    onboardingCheckedRef.current = true;
+    if (shouldShowOnboarding()) setOnboardingOpen(true);
+  }, [loading]);
+
   const changeTheme = useCallback((nextTheme: ThemeStyle) => {
     applyAppearance(
       document.documentElement,
@@ -233,9 +247,15 @@ export default function App() {
         event.preventDefault();
         setSidebarOpen((value) => !value);
       }
+      if (event.key === "F1") {
+        event.preventDefault();
+        setAppearanceOpen(false);
+        setHelpOpen(true);
+      }
       if (event.key === "Escape") {
         setSearchOpen(false);
         setAppearanceOpen(false);
+        setHelpOpen(false);
         setVaultMenu(null);
         setItemMenu(null);
       }
@@ -829,6 +849,7 @@ export default function App() {
   const activeVault = vaults.find((vault) => vault.id === activeVaultId);
   const totalLines = draft ? draft.split("\n").length : 0;
   const showRightPanel = Boolean(current?.kind === "markdown" && rightPanelOpen);
+  const primaryShortcut = navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl+";
 
   return (
     <div className={`app-shell ${runningInTauri && navigator.platform.toLowerCase().includes("mac") ? "native-macos" : ""} ${sidebarOpen ? "" : "sidebar-closed"} ${showRightPanel ? "" : "right-closed"}`}>
@@ -865,28 +886,46 @@ export default function App() {
       <main className="workspace">
         <header className="workspace-topbar window-drag" data-tauri-drag-region>
           {!sidebarOpen && (
-            <button className="icon-button" onClick={() => setSidebarOpen(true)} title="显示侧栏">
-              <Menu size={18} />
-            </button>
+            <HoverTip label="显示侧栏" detail="打开资料库和文件列表" shortcut={`${primaryShortcut}\\`}>
+              <button className="icon-button" onClick={() => setSidebarOpen(true)}>
+                <Menu size={18} />
+              </button>
+            </HoverTip>
           )}
           <div className="breadcrumbs">
             {activeVault && <span>{activeVault.name}</span>}
             {current && <><i>/</i><strong>{current.title}</strong></>}
           </div>
           <div className="topbar-actions">
-            <button className="icon-button" onClick={() => setSearchOpen(true)} title={t("search")}><Search size={17} /></button>
-            <button
-              className={`icon-button ${appearanceOpen ? "active" : ""}`}
-              aria-expanded={appearanceOpen}
-              onClick={() => setAppearanceOpen((value) => !value)}
-              title={t("appearance")}
-            >
-              <Palette size={17} />
-            </button>
-            {current?.kind === "markdown" && (
-              <button className={`icon-button ${rightPanelOpen ? "active" : ""}`} onClick={() => setRightPanelOpen((value) => !value)} title={t("outline")}>
-                <PanelRight size={17} />
+            <HoverTip label="搜索全部资料库" detail="查找笔记内容、标签和文件" shortcut={`${primaryShortcut}K`}>
+              <button className="icon-button" onClick={() => setSearchOpen(true)}><Search size={17} /></button>
+            </HoverTip>
+            <HoverTip label="使用帮助" detail="搜索操作说明或重新查看新手引导" shortcut="F1">
+              <button
+                className={`icon-button ${helpOpen ? "active" : ""}`}
+                onClick={() => {
+                  setAppearanceOpen(false);
+                  setHelpOpen(true);
+                }}
+              >
+                <CircleHelp size={17} />
               </button>
+            </HoverTip>
+            <HoverTip label="外观" detail="切换主题以及明亮、深色模式">
+              <button
+                className={`icon-button ${appearanceOpen ? "active" : ""}`}
+                aria-expanded={appearanceOpen}
+                onClick={() => setAppearanceOpen((value) => !value)}
+              >
+                <Palette size={17} />
+              </button>
+            </HoverTip>
+            {current?.kind === "markdown" && (
+              <HoverTip label="笔记信息" detail="查看标签、大纲、反向链接和历史">
+                <button className={`icon-button ${rightPanelOpen ? "active" : ""}`} onClick={() => setRightPanelOpen((value) => !value)}>
+                  <PanelRight size={17} />
+                </button>
+              </HoverTip>
             )}
           </div>
           <AppearancePopover
@@ -945,8 +984,12 @@ export default function App() {
                     <ExternalLink size={15} /> {t("openWithDefaultApp")}
                   </button>
                 )}
-                <button className={`icon-button ${current.isPinned ? "active" : ""}`} onClick={() => void toggleFlag("pinned")} title={t("pinned")}><Pin size={16} /></button>
-                <button className={`icon-button ${current.isFavorite ? "active" : ""}`} onClick={() => void toggleFlag("favorite")} title={t("favorites")}><Heart size={16} /></button>
+                <HoverTip label={current.isPinned ? "取消置顶" : "置顶"} detail="在侧栏的置顶列表中快速找到">
+                  <button className={`icon-button ${current.isPinned ? "active" : ""}`} onClick={() => void toggleFlag("pinned")}><Pin size={16} /></button>
+                </HoverTip>
+                <HoverTip label={current.isFavorite ? "取消收藏" : "收藏"} detail="加入侧栏的收藏列表">
+                  <button className={`icon-button ${current.isFavorite ? "active" : ""}`} onClick={() => void toggleFlag("favorite")}><Heart size={16} /></button>
+                </HoverTip>
                 <DocumentMenu
                   onRename={openRenameDialog}
                   onDelete={() => current && requestDelete(current)}
@@ -1055,6 +1098,24 @@ export default function App() {
         onQueryChange={setSearchQuery}
         onSelect={selectSearchHit}
         onClose={() => setSearchOpen(false)}
+      />
+
+      <HelpCenter
+        open={helpOpen}
+        platform={navigator.platform}
+        onClose={() => setHelpOpen(false)}
+        onStartTour={() => {
+          setHelpOpen(false);
+          setOnboardingOpen(true);
+        }}
+      />
+
+      <OnboardingTour
+        open={onboardingOpen}
+        onFinish={() => {
+          completeOnboarding();
+          setOnboardingOpen(false);
+        }}
       />
 
       <RenameDialog
@@ -1201,7 +1262,9 @@ function DocumentMenu({
   const [open, setOpen] = useState(false);
   return (
     <div className="document-menu-wrap">
-      <button className="icon-button" onClick={() => setOpen((value) => !value)}><MoreHorizontal size={17} /></button>
+      <HoverTip label="更多操作" detail="重命名、同步或移到废纸篓" side="top">
+        <button className="icon-button" onClick={() => setOpen((value) => !value)}><MoreHorizontal size={17} /></button>
+      </HoverTip>
       {open && (
         <div className="context-menu document-context">
           {onSync && <button onClick={() => { setOpen(false); onSync(); }}><RefreshCw size={14} />{t("syncFromSource")}</button>}
