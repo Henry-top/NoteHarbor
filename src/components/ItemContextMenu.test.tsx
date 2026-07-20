@@ -56,7 +56,7 @@ describe("ItemContextMenu", () => {
     );
 
     expect(screen.getByRole("menuitem", { name: "复制笔记" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "复制双向链接" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "复制笔记链接" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "在访达中显示" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("menuitem", { name: "重命名" }));
     expect(onClose).toHaveBeenCalledTimes(1);

@@ -1121,7 +1121,7 @@ export default function App() {
               ? () => void duplicateNote(itemMenu.item)
               : undefined,
             onCopyWikiLink: itemMenu.item.kind === "markdown"
-              ? () => void copyItemText(`[[${itemMenu.item.title}]]`, "已复制双向链接")
+              ? () => void copyItemText(`[[${itemMenu.item.title}]]`, "已复制笔记链接")
               : undefined,
             onCopyPath: () => void copyItemText(itemMenu.item.path, "已复制相对路径"),
             onTogglePinned: () => void toggleItemFlag(itemMenu.item, "pinned"),

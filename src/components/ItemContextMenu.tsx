@@ -83,7 +83,7 @@ export function ItemContextMenu({
         )}
         {actions.onCopyWikiLink && (
           <button role="menuitem" onClick={() => run(actions.onCopyWikiLink!)}>
-            <Link2 size={14} />复制双向链接
+            <Link2 size={14} />复制笔记链接
           </button>
         )}
         <button role="menuitem" onClick={() => run(actions.onCopyPath)}>
