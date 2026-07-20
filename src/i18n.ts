@@ -33,7 +33,7 @@ const zhCN = {
   backlinks: "反向链接",
   noOutline: "当前笔记还没有标题",
   noBacklinks: "还没有笔记链接到这里",
-  sourceMode: "源码",
+  sourceMode: "Markdown",
   liveMode: "即时渲染",
   splitMode: "分栏",
   saved: "已保存",

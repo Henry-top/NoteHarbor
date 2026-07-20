@@ -107,7 +107,7 @@ const demoVault: Vault = {
 };
 
 const initialMockNotes: MockNote[] = [
-  mockDocument("欢迎来到墨岛笔记.md", `---\nid: demo-welcome\ncreated: 2026-07-19T00:00:00.000Z\nupdated: 2026-07-19T00:00:00.000Z\ntags: ["开始", "墨岛"]\n---\n\n# 欢迎来到墨岛笔记\n\n你的文字，停泊在自己手中。\n\n## 从这里开始\n\n- 使用左侧资料库管理本地 Markdown 文件\n- 按 **⌘ K** 搜索全部资料库\n- 在源码、即时渲染和分栏模式间自由切换\n\n试试链接到 [[写作灵感]]，或者输入一个公式：$E = mc^2$。\n\n> 所有笔记都是普通的 Markdown 文件。\n`),
+  mockDocument("欢迎来到墨岛笔记.md", `---\nid: demo-welcome\ncreated: 2026-07-19T00:00:00.000Z\nupdated: 2026-07-19T00:00:00.000Z\ntags: ["开始", "墨岛"]\n---\n\n# 欢迎来到墨岛笔记\n\n你的文字，停泊在自己手中。\n\n## 从这里开始\n\n- 使用左侧资料库管理本地 Markdown 文件\n- 按 **⌘ K** 搜索全部资料库\n- 在 Markdown、即时渲染和分栏模式间自由切换\n\n试试链接到 [[写作灵感]]，或者输入一个公式：$E = mc^2$。\n\n> 所有笔记都是普通的 Markdown 文件。\n`),
   mockDocument("写作灵感.md", `---\nid: demo-ideas\ncreated: 2026-07-19T00:01:00.000Z\nupdated: 2026-07-19T00:01:00.000Z\ntags: ["灵感"]\n---\n\n# 写作灵感\n\n好的工具应该在需要时出现，在思考时退后。\n\n## 待整理\n\n- [ ] 记录今天读到的一句话\n- [ ] 整理项目想法\n- [x] 建立自己的笔记港湾\n\n返回 [[欢迎来到墨岛笔记]]。\n`),
   mockDocument("Markdown 示例.md", `---\nid: demo-markdown\ncreated: 2026-07-19T00:02:00.000Z\nupdated: 2026-07-19T00:02:00.000Z\ntags: ["Markdown", "示例"]\n---\n\n# Markdown 示例\n\n| 能力 | 状态 |\n| --- | --- |\n| 表格 | ✓ |\n| 数学公式 | ✓ |\n| Mermaid | ✓ |\n\n\`\`\`mermaid\nflowchart LR\n  A[想法] --> B[笔记]\n  B --> C[连接]\n\`\`\`\n`)
 ];

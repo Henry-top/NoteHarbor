@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version 0.3.1" src="https://img.shields.io/badge/version-0.3.1-3f7f99?style=flat-square">
+  <img alt="Version 0.3.2" src="https://img.shields.io/badge/version-0.3.2-3f7f99?style=flat-square">
   <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri&logoColor=white">
   <img alt="React" src="https://img.shields.io/badge/React-TypeScript-3178C6?style=flat-square&logo=react&logoColor=white">
   <img alt="Local first" src="https://img.shields.io/badge/data-local--first-5D876E?style=flat-square">
@@ -36,14 +36,14 @@
 
 | 文件始终属于你 | 写作足够顺手 | 笔记与文档共处 |
 | --- | --- | --- |
-| 标准 Markdown、本地文件夹，不创建专有内容格式 | 源码、即时渲染、左右分栏随时切换 | Markdown、DOCX 和 DOC 在同一资料库中管理 |
+| 标准 Markdown、本地文件夹，不创建专有内容格式 | Markdown 原文、即时渲染、左右分栏随时切换 | Markdown、DOCX 和 DOC 在同一资料库中管理 |
 | 当前本地版无需登录，核心编辑功能不依赖网络 | 自动保存、历史快照、冲突保护 | DOCX 本地预览，原始 Word 文件不转换 |
 
 ## 不只是“能写 Markdown”
 
 ### 写得舒服
 
-- 源码、即时渲染、左右分栏三种模式，共用同一份内容
+- Markdown 原文、即时渲染、左右分栏三种模式，共用同一份内容
 - 表格、任务列表、脚注、代码高亮、KaTeX 数学公式和 Mermaid 图表
 - 约 500 毫秒防抖自动保存，外部修改时停止覆盖并提示处理
 - 现代克制、温暖纸张、通透玻璃三套主题，支持明亮与深色模式
@@ -94,7 +94,7 @@
 
 ## 下载与安装
 
-当前版本为 **0.3.1**，安装包可在 [Releases](../../releases/latest) 页面下载：
+当前版本为 **0.3.2**，安装包可在 [Releases](../../releases/latest) 页面下载：
 
 - Apple 芯片 Mac：下载 `.dmg`，打开后把“墨岛笔记”拖入“应用程序”
 - Windows x64：普通用户建议下载 `.exe` 安装程序，也可以使用 `.msi`
@@ -104,7 +104,7 @@
 
 ## 当前边界
 
-墨岛笔记目前专注于个人、本地的笔记与文档管理。`0.3.1` 暂不包含账户、云同步、多人协作、插件、移动端和知识图谱。
+墨岛笔记目前专注于个人、本地的笔记与文档管理。`0.3.2` 暂不包含账户、云同步、多人协作、插件、移动端和知识图谱。
 
 未来加入云同步后，使用同步服务将需要账号；现有本地资料库和 Markdown 格式不会因此改变。同步功能会建立在稳定笔记 ID 和原始文件之上，不会要求把现有 Markdown 迁移为私有格式。
 

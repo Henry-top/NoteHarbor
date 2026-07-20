@@ -11,7 +11,7 @@ export function ModeSwitcher({
 }) {
   return (
     <div className="segmented mode-switcher" aria-label="编辑模式">
-      <button className={mode === "source" ? "active" : ""} onClick={() => onChange("source")} title="源码模式：完整显示 Markdown 标记">
+      <button className={mode === "source" ? "active" : ""} onClick={() => onChange("source")} title="Markdown 原文：完整显示格式标记">
         <FileCode2 size={15} />
         <span>{t("sourceMode")}</span>
       </button>

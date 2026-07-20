@@ -121,6 +121,194 @@ class CodeBlockWidget extends WidgetType {
   }
 }
 
+const safeHtmlTags = new Set([
+  "a",
+  "b",
+  "blockquote",
+  "br",
+  "code",
+  "del",
+  "details",
+  "div",
+  "em",
+  "figcaption",
+  "figure",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "hr",
+  "i",
+  "img",
+  "kbd",
+  "li",
+  "mark",
+  "ol",
+  "p",
+  "pre",
+  "s",
+  "small",
+  "span",
+  "strong",
+  "sub",
+  "summary",
+  "sup",
+  "table",
+  "tbody",
+  "td",
+  "th",
+  "thead",
+  "tr",
+  "u",
+  "ul"
+]);
+
+const htmlBlockTags = new Set([
+  "blockquote",
+  "details",
+  "div",
+  "figure",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "ol",
+  "p",
+  "pre",
+  "table",
+  "ul"
+]);
+
+function isSafeHtmlUrl(value: string, attribute: "href" | "src"): boolean {
+  const normalized = [...value.trim()]
+    .filter((character) => {
+      const code = character.charCodeAt(0);
+      return code > 0x1f && code !== 0x7f && !/\s/.test(character);
+    })
+    .join("");
+  if (
+    normalized.startsWith("#")
+    || normalized.startsWith("/")
+    || normalized.startsWith("./")
+    || normalized.startsWith("../")
+  ) return true;
+  if (attribute === "src" && /^data:image\/(?:png|jpe?g|gif|webp);base64,/i.test(normalized)) {
+    return true;
+  }
+  try {
+    const protocol = new URL(normalized, "https://noteharbor.invalid").protocol;
+    return protocol === "http:" || protocol === "https:" || (attribute === "href" && protocol === "mailto:");
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeHtmlElement(element: Element): void {
+  const tag = element.tagName.toLowerCase();
+  if (!safeHtmlTags.has(tag)) {
+    element.remove();
+    return;
+  }
+
+  for (const attribute of [...element.attributes]) {
+    const name = attribute.name.toLowerCase();
+    const globallyAllowed = name === "align" || name === "title";
+    const tagAllowed = (
+      (tag === "a" && name === "href")
+      || (tag === "img" && ["src", "alt", "width", "height"].includes(name))
+      || (["td", "th"].includes(tag) && ["colspan", "rowspan"].includes(name))
+      || (tag === "details" && name === "open")
+    );
+    if (!globallyAllowed && !tagAllowed) {
+      element.removeAttribute(attribute.name);
+      continue;
+    }
+    if ((name === "href" || name === "src") && !isSafeHtmlUrl(attribute.value, name)) {
+      element.removeAttribute(attribute.name);
+      continue;
+    }
+    if (name === "align" && !/^(?:left|right|center|justify)$/i.test(attribute.value)) {
+      element.removeAttribute(attribute.name);
+      continue;
+    }
+    if (["width", "height", "colspan", "rowspan"].includes(name) && !/^\d{1,4}$/.test(attribute.value)) {
+      element.removeAttribute(attribute.name);
+    }
+  }
+
+  for (const child of [...element.children]) sanitizeHtmlElement(child);
+}
+
+function createSafeHtmlFragment(source: string): DocumentFragment {
+  const parsed = new DOMParser().parseFromString(`<body>${source}</body>`, "text/html");
+  for (const element of [...parsed.body.children]) sanitizeHtmlElement(element);
+  for (const child of [...parsed.body.childNodes]) {
+    if (child.nodeType === Node.COMMENT_NODE) child.remove();
+  }
+  const fragment = document.createDocumentFragment();
+  fragment.append(...parsed.body.childNodes);
+  return fragment;
+}
+
+class HtmlBlockWidget extends WidgetType {
+  constructor(
+    readonly source: string,
+    readonly sourcePosition: number,
+    readonly sourceEnd: number
+  ) {
+    super();
+  }
+
+  eq(other: HtmlBlockWidget) {
+    return (
+      other.source === this.source
+      && other.sourcePosition === this.sourcePosition
+      && other.sourceEnd === this.sourceEnd
+    );
+  }
+
+  toDOM(view: EditorView) {
+    const container = document.createElement("div");
+    container.className = "cm-live-html-block";
+    container.title = "点击编辑 HTML";
+    container.append(createSafeHtmlFragment(this.source));
+    container.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      view.dispatch({
+        selection: {
+          anchor: Math.min(this.sourcePosition + 1, this.sourceEnd, view.state.doc.length)
+        },
+        scrollIntoView: true
+      });
+      view.focus();
+    });
+    return container;
+  }
+}
+
+interface HtmlBlockOpening {
+  tag: string;
+  closesOnSameLine: boolean;
+}
+
+function parseHtmlBlockOpening(text: string): HtmlBlockOpening | null {
+  const trimmed = text.trim();
+  const standalone = /^<(img|hr|br)\b[^>]*\/?>$/i.exec(trimmed);
+  if (standalone) return { tag: standalone[1].toLowerCase(), closesOnSameLine: true };
+  const opening = /^<([a-z][a-z0-9-]*)\b[^>]*>/i.exec(trimmed);
+  if (!opening) return null;
+  const tag = opening[1].toLowerCase();
+  if (!htmlBlockTags.has(tag)) return null;
+  return {
+    tag,
+    closesOnSameLine: new RegExp(`</${tag}\\s*>`, "i").test(trimmed)
+  };
+}
+
 interface FenceOpening {
   marker: "`" | "~";
   length: number;
@@ -173,6 +361,48 @@ function buildDecorations(state: EditorState): DecorationSet {
 
   const blockedLines = new Set<number>();
   for (let number = firstVisibleLine; number <= state.doc.lines; number += 1) {
+    const line = state.doc.line(number);
+    const html = parseHtmlBlockOpening(line.text);
+    if (!html) continue;
+    let closingNumber = number;
+    if (!html.closesOnSameLine) {
+      const closingPattern = new RegExp(`</${html.tag}\\s*>`, "i");
+      closingNumber = 0;
+      for (let candidate = number + 1; candidate <= state.doc.lines; candidate += 1) {
+        if (closingPattern.test(state.doc.line(candidate).text)) {
+          closingNumber = candidate;
+          break;
+        }
+      }
+      if (closingNumber === 0) continue;
+    }
+    const closing = state.doc.line(closingNumber);
+    for (let blocked = number; blocked <= closingNumber; blocked += 1) blockedLines.add(blocked);
+    const initialCursorAtDocumentStart = line.from === 0 && state.selection.main.head === 0;
+    const cursorInside = (
+      cursorLine >= number
+      && cursorLine <= closingNumber
+      && !initialCursorAtDocumentStart
+    );
+    if (!cursorInside) {
+      decorations.push({
+        from: line.from,
+        to: closing.to,
+        value: Decoration.replace({
+          widget: new HtmlBlockWidget(
+            state.doc.sliceString(line.from, closing.to),
+            line.from,
+            closing.to
+          ),
+          block: true
+        })
+      });
+    }
+    number = closingNumber;
+  }
+
+  for (let number = firstVisibleLine; number <= state.doc.lines; number += 1) {
+    if (blockedLines.has(number)) continue;
     const line = state.doc.line(number);
     const trimmed = line.text.trim();
     const fence = parseFenceOpening(line.text);
@@ -338,6 +568,48 @@ export const livePreviewExtension = [
       lineHeight: "1.4",
       textTransform: "lowercase",
       pointerEvents: "none"
+    },
+    ".cm-live-html-block": {
+      display: "block",
+      margin: "10px 0",
+      color: "var(--text)",
+      fontFamily: "var(--font-editor)",
+      lineHeight: "1.7",
+      cursor: "text"
+    },
+    ".cm-live-html-block > :first-child": { marginTop: "0" },
+    ".cm-live-html-block > :last-child": { marginBottom: "0" },
+    ".cm-live-html-block p": { margin: "0.7em 0" },
+    ".cm-live-html-block h1, .cm-live-html-block h2, .cm-live-html-block h3": {
+      margin: "0.8em 0 0.55em",
+      color: "var(--text-strong)",
+      fontFamily: "var(--font-display)",
+      fontWeight: "650",
+      lineHeight: "1.4"
+    },
+    ".cm-live-html-block h1": { fontSize: "2em" },
+    ".cm-live-html-block h2": { fontSize: "1.55em" },
+    ".cm-live-html-block h3": { fontSize: "1.28em" },
+    ".cm-live-html-block img": {
+      display: "inline-block",
+      maxWidth: "100%",
+      height: "auto",
+      margin: "3px",
+      verticalAlign: "middle"
+    },
+    ".cm-live-html-block a": {
+      color: "var(--accent-strong)",
+      textDecoration: "none",
+      borderBottom: "1px solid color-mix(in srgb, var(--accent) 36%, transparent)",
+      pointerEvents: "none"
+    },
+    ".cm-live-html-block table": {
+      width: "100%",
+      borderCollapse: "collapse"
+    },
+    ".cm-live-html-block th, .cm-live-html-block td": {
+      padding: "7px 10px",
+      border: "1px solid var(--border)"
     },
     ".cm-math-inline": {
       display: "inline-block",

@@ -36,7 +36,7 @@ const steps = [
   {
     eyebrow: "第二步",
     title: "选择喜欢的编辑方式",
-    description: "源码、即时渲染和左右分栏共用同一份内容，可以随时切换。",
+    description: "Markdown 原文、即时渲染和左右分栏共用同一份内容，可以随时切换。",
     icon: BookOpen,
     points: [
       { icon: FileText, text: "输入内容后自动保存，无需手动操作" },
