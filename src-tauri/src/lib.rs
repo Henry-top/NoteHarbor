@@ -1578,15 +1578,15 @@ fn lock_error<T>(_: std::sync::PoisonError<T>) -> AppError {
 #[tauri::command]
 fn set_window_effect(window: WebviewWindow, enabled: bool, dark: bool) -> AppResult<()> {
     if !enabled {
-        return window
-            .set_effects(None)
-            .map_err(|error| app_error("WINDOW_EFFECT_ERROR", format!("无法关闭窗口材质：{error}")));
+        return window.set_effects(None).map_err(|error| {
+            app_error("WINDOW_EFFECT_ERROR", format!("无法关闭窗口材质：{error}"))
+        });
     }
 
     #[cfg(target_os = "macos")]
     {
         let _ = dark;
-        return window
+        window
             .set_effects(
                 EffectsBuilder::new()
                     .effect(Effect::UnderWindowBackground)
@@ -1599,7 +1599,7 @@ fn set_window_effect(window: WebviewWindow, enabled: bool, dark: bool) -> AppRes
                     "WINDOW_EFFECT_ERROR",
                     format!("无法启用 macOS 通透材质：{error}"),
                 )
-            });
+            })
     }
 
     #[cfg(target_os = "windows")]
@@ -1609,14 +1609,14 @@ fn set_window_effect(window: WebviewWindow, enabled: bool, dark: bool) -> AppRes
         } else {
             Effect::MicaLight
         };
-        return window
+        window
             .set_effects(EffectsBuilder::new().effect(effect).build())
             .map_err(|error| {
                 app_error(
                     "WINDOW_EFFECT_ERROR",
                     format!("无法启用 Windows Mica 材质：{error}"),
                 )
-            });
+            })
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
