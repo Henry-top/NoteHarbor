@@ -953,9 +953,20 @@ kbd {
   background: transparent;
 }
 
+.editor-pane .editor-codemirror {
+  height: 100%;
+  min-height: 0;
+}
+
 .editor-pane .cm-editor {
   height: 100%;
+  min-height: 0;
   color: var(--text);
+}
+
+.editor-pane .cm-scroller {
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .editor-pane .cm-cursor {

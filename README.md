@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version 0.3.0" src="https://img.shields.io/badge/version-0.3.0-3f7f99?style=flat-square">
+  <img alt="Version 0.3.1" src="https://img.shields.io/badge/version-0.3.1-3f7f99?style=flat-square">
   <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri&logoColor=white">
   <img alt="React" src="https://img.shields.io/badge/React-TypeScript-3178C6?style=flat-square&logo=react&logoColor=white">
   <img alt="Local first" src="https://img.shields.io/badge/data-local--first-5D876E?style=flat-square">
@@ -94,7 +94,7 @@
 
 ## 下载与安装
 
-当前版本为 **0.3.0**，现提供适用于 **Apple 芯片 Mac** 的 DMG 安装包。
+当前版本为 **0.3.1**，现提供适用于 **Apple 芯片 Mac** 的 DMG 安装包。
 
 1. 前往 [Releases](../../releases/latest) 下载最新的 `.dmg`
 2. 打开 DMG，把“墨岛笔记”拖入“应用程序”
@@ -105,7 +105,7 @@
 
 ## 当前边界
 
-墨岛笔记目前专注于个人、本地的笔记与文档管理。`0.3.0` 暂不包含账户、云同步、多人协作、插件、移动端和知识图谱。
+墨岛笔记目前专注于个人、本地的笔记与文档管理。`0.3.1` 暂不包含账户、云同步、多人协作、插件、移动端和知识图谱。
 
 未来加入云同步后，使用同步服务将需要账号；现有本地资料库和 Markdown 格式不会因此改变。同步功能会建立在稳定笔记 ID 和原始文件之上，不会要求把现有 Markdown 迁移为私有格式。
 

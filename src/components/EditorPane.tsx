@@ -123,6 +123,7 @@ export function EditorPane({
   return (
     <div className={`editor-pane editor-${mode}`}>
       <CodeMirror
+        className="editor-codemirror"
         ref={editorRef}
         value={value}
         height="100%"

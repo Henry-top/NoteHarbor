@@ -5,6 +5,7 @@ import {
   WidgetType,
   type DecorationSet
 } from "@codemirror/view";
+import hljs from "highlight.js/lib/common";
 import katex from "katex";
 
 class MathWidget extends WidgetType {
@@ -65,6 +66,90 @@ class MermaidWidget extends WidgetType {
   }
 }
 
+class CodeBlockWidget extends WidgetType {
+  constructor(
+    readonly source: string,
+    readonly language: string,
+    readonly sourcePosition: number
+  ) {
+    super();
+  }
+
+  eq(other: CodeBlockWidget) {
+    return (
+      other.source === this.source
+      && other.language === this.language
+      && other.sourcePosition === this.sourcePosition
+    );
+  }
+
+  toDOM(view: EditorView) {
+    const container = document.createElement("div");
+    container.className = "cm-live-code-block";
+    container.title = "点击编辑代码";
+
+    if (this.language) {
+      const label = document.createElement("span");
+      label.className = "cm-live-code-language";
+      label.textContent = this.language;
+      container.append(label);
+    }
+
+    const pre = document.createElement("pre");
+    const code = document.createElement("code");
+    code.className = "hljs";
+    try {
+      const highlighted = this.language && hljs.getLanguage(this.language)
+        ? hljs.highlight(this.source, { language: this.language })
+        : hljs.highlightAuto(this.source);
+      code.innerHTML = highlighted.value;
+    } catch {
+      code.textContent = this.source;
+    }
+    pre.append(code);
+    container.append(pre);
+
+    container.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      view.dispatch({
+        selection: { anchor: Math.min(this.sourcePosition, view.state.doc.length) },
+        scrollIntoView: true
+      });
+      view.focus();
+    });
+    return container;
+  }
+}
+
+interface FenceOpening {
+  marker: "`" | "~";
+  length: number;
+  language: string;
+}
+
+function parseFenceOpening(text: string): FenceOpening | null {
+  const match = /^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(text);
+  if (!match) return null;
+  const marker = match[1][0] as "`" | "~";
+  const info = match[2].trim();
+  if (marker === "`" && info.includes("`")) return null;
+  const language = (info.split(/\s+/)[0] || "")
+    .replace(/^\{?\.?/, "")
+    .replace(/\}?$/, "")
+    .toLowerCase();
+  return { marker, length: match[1].length, language };
+}
+
+function isFenceClosing(text: string, opening: FenceOpening): boolean {
+  const indentation = text.length - text.trimStart().length;
+  if (indentation > 3) return false;
+  const candidate = text.trim();
+  return (
+    candidate.length >= opening.length
+    && [...candidate].every((character) => character === opening.marker)
+  );
+}
+
 function buildDecorations(state: EditorState): DecorationSet {
   const decorations: { from: number; to?: number; value: Decoration }[] = [];
   const cursorLine = state.doc.lineAt(state.selection.main.head).number;
@@ -90,21 +175,28 @@ function buildDecorations(state: EditorState): DecorationSet {
   for (let number = firstVisibleLine; number <= state.doc.lines; number += 1) {
     const line = state.doc.line(number);
     const trimmed = line.text.trim();
-    const isMermaid = trimmed.toLowerCase() === "```mermaid";
+    const fence = parseFenceOpening(line.text);
     const isMath = trimmed === "$$";
-    if (!isMermaid && !isMath) continue;
+    if (!fence && !isMath) continue;
     for (let closingNumber = number + 1; closingNumber <= state.doc.lines; closingNumber += 1) {
       const closing = state.doc.line(closingNumber);
-      const isClosing = isMermaid ? closing.text.trim() === "```" : closing.text.trim() === "$$";
+      const isClosing = fence
+        ? isFenceClosing(closing.text, fence)
+        : closing.text.trim() === "$$";
       if (!isClosing) continue;
       for (let hidden = number; hidden <= closingNumber; hidden += 1) blockedLines.add(hidden);
       if (cursorLine < number || cursorLine > closingNumber) {
         const source = state.doc.sliceString(line.to + 1, closing.from).trim();
+        const widget = isMath
+          ? new MathWidget(source, true)
+          : fence?.language === "mermaid"
+            ? new MermaidWidget(source)
+            : new CodeBlockWidget(source, fence?.language || "", line.from);
         decorations.push({
           from: line.from,
           to: closing.to,
           value: Decoration.replace({
-            widget: isMermaid ? new MermaidWidget(source) : new MathWidget(source, true),
+            widget,
             block: true
           })
         });
@@ -205,6 +297,47 @@ export const livePreviewExtension = [
       overflow: "auto",
       background: "var(--surface-muted)",
       color: "var(--text)"
+    },
+    ".cm-live-code-block": {
+      position: "relative",
+      display: "block",
+      margin: "14px 0",
+      border: "1px solid var(--border)",
+      borderRadius: "10px",
+      overflow: "hidden",
+      background: "#20272d",
+      color: "#e5eaed",
+      cursor: "text"
+    },
+    ".cm-live-code-block pre": {
+      margin: "0",
+      padding: "16px 18px",
+      overflowX: "auto",
+      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+      fontSize: "0.88em",
+      lineHeight: "1.62",
+      whiteSpace: "pre"
+    },
+    ".cm-live-code-block code": {
+      display: "block",
+      minHeight: "1.62em",
+      padding: "0",
+      background: "transparent"
+    },
+    ".cm-live-code-language": {
+      position: "absolute",
+      zIndex: "1",
+      top: "7px",
+      right: "9px",
+      padding: "2px 6px",
+      borderRadius: "5px",
+      color: "#9eabb4",
+      background: "rgba(32, 39, 45, 0.82)",
+      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+      fontSize: "9px",
+      lineHeight: "1.4",
+      textTransform: "lowercase",
+      pointerEvents: "none"
     },
     ".cm-math-inline": {
       display: "inline-block",
