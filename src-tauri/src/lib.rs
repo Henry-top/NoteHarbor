@@ -12,7 +12,10 @@ use std::{
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{
+    window::{Effect, EffectState, EffectsBuilder},
+    AppHandle, Emitter, Manager, State, WebviewWindow,
+};
 use tauri_plugin_opener::OpenerExt;
 use tempfile::NamedTempFile;
 use uuid::Uuid;
@@ -1572,6 +1575,57 @@ fn lock_error<T>(_: std::sync::PoisonError<T>) -> AppError {
     app_error("STATE_ERROR", "应用内部状态暂时不可用")
 }
 
+#[tauri::command]
+fn set_window_effect(window: WebviewWindow, enabled: bool, dark: bool) -> AppResult<()> {
+    if !enabled {
+        return window
+            .set_effects(None)
+            .map_err(|error| app_error("WINDOW_EFFECT_ERROR", format!("无法关闭窗口材质：{error}")));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = dark;
+        return window
+            .set_effects(
+                EffectsBuilder::new()
+                    .effect(Effect::UnderWindowBackground)
+                    .state(EffectState::FollowsWindowActiveState)
+                    .radius(14.0)
+                    .build(),
+            )
+            .map_err(|error| {
+                app_error(
+                    "WINDOW_EFFECT_ERROR",
+                    format!("无法启用 macOS 通透材质：{error}"),
+                )
+            });
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let effect = if dark {
+            Effect::MicaDark
+        } else {
+            Effect::MicaLight
+        };
+        return window
+            .set_effects(EffectsBuilder::new().effect(effect).build())
+            .map_err(|error| {
+                app_error(
+                    "WINDOW_EFFECT_ERROR",
+                    format!("无法启用 Windows Mica 材质：{error}"),
+                )
+            });
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (window, dark);
+        Ok(())
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1592,6 +1646,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            set_window_effect,
             list_vaults,
             register_vault,
             remove_vault,

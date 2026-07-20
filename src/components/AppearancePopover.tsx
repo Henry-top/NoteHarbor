@@ -1,3 +1,4 @@
+import { useEffect, useRef, type RefObject } from "react";
 import { Check, Monitor, Moon, Palette, Sun, X } from "lucide-react";
 import { t } from "../i18n";
 import type { ColorMode, ThemeStyle } from "../types";
@@ -8,7 +9,8 @@ export function AppearancePopover({
   colorMode,
   onThemeChange,
   onColorModeChange,
-  onClose
+  onClose,
+  anchorRef
 }: {
   open: boolean;
   theme: ThemeStyle;
@@ -16,7 +18,34 @@ export function AppearancePopover({
   onThemeChange: (theme: ThemeStyle) => void;
   onColorModeChange: (mode: ColorMode) => void;
   onClose: () => void;
+  anchorRef?: RefObject<HTMLElement | null>;
 }) {
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const closeOutside = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (popoverRef.current?.contains(target) || anchorRef?.current?.contains(target)) return;
+      onClose();
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    const closeOnBlur = () => onClose();
+
+    document.addEventListener("pointerdown", closeOutside, true);
+    document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("blur", closeOnBlur);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside, true);
+      document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("blur", closeOnBlur);
+    };
+  }, [anchorRef, onClose, open]);
+
   if (!open) return null;
   const themes: { id: ThemeStyle; label: string; colors: string[] }[] = [
     { id: "modern", label: t("modern"), colors: ["#f7f8fa", "#376f8c", "#1f2933"] },
@@ -25,7 +54,7 @@ export function AppearancePopover({
   ];
 
   return (
-    <div className="appearance-popover" role="dialog" aria-label={t("appearance")}>
+    <div ref={popoverRef} className="appearance-popover" role="dialog" aria-label={t("appearance")}>
       <header>
         <span><Palette size={16} /> {t("appearance")}</span>
         <button type="button" className="icon-button" onClick={onClose}><X size={15} /></button>

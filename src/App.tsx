@@ -96,6 +96,7 @@ export default function App() {
   const [renameBusy, setRenameBusy] = useState(false);
   const [renameError, setRenameError] = useState("");
   const previewRef = useRef<HTMLDivElement>(null);
+  const appearanceButtonRef = useRef<HTMLButtonElement>(null);
   const draftRef = useRef(draft);
   const currentRef = useRef(current);
   const operationQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -199,11 +200,21 @@ export default function App() {
   useEffect(() => {
     const root = window.document.documentElement;
     const systemScheme = window.matchMedia("(prefers-color-scheme: dark)");
-    const update = () => applyAppearance(root, theme, colorMode, systemScheme.matches);
+    const reducedTransparency = window.matchMedia("(prefers-reduced-transparency: reduce)");
+    const update = () => {
+      applyAppearance(root, theme, colorMode, systemScheme.matches);
+      const dark = colorMode === "system" ? systemScheme.matches : colorMode === "dark";
+      void api.setWindowEffect(theme === "glass" && !reducedTransparency.matches, dark)
+        .catch((error) => console.warn("无法切换窗口材质", error));
+    };
     update();
     storeAppearance(localStorage, theme, colorMode);
     systemScheme.addEventListener("change", update);
-    return () => systemScheme.removeEventListener("change", update);
+    reducedTransparency.addEventListener("change", update);
+    return () => {
+      systemScheme.removeEventListener("change", update);
+      reducedTransparency.removeEventListener("change", update);
+    };
   }, [theme, colorMode]);
 
   useEffect(() => {
@@ -913,6 +924,7 @@ export default function App() {
             </HoverTip>
             <HoverTip label="外观" detail="切换主题以及明亮、深色模式">
               <button
+                ref={appearanceButtonRef}
                 className={`icon-button ${appearanceOpen ? "active" : ""}`}
                 aria-expanded={appearanceOpen}
                 onClick={() => setAppearanceOpen((value) => !value)}
@@ -935,6 +947,7 @@ export default function App() {
             onThemeChange={changeTheme}
             onColorModeChange={changeColorMode}
             onClose={() => setAppearanceOpen(false)}
+            anchorRef={appearanceButtonRef}
           />
         </header>
 

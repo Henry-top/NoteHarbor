@@ -16,6 +16,7 @@ import { makeNewNoteContent, splitFrontmatter } from "./markdown";
 const isTauri = () => "__TAURI_INTERNALS__" in window;
 
 export interface NativeApi {
+  setWindowEffect(enabled: boolean, dark: boolean): Promise<void>;
   listVaults(): Promise<Vault[]>;
   registerVault(path: string): Promise<Vault>;
   removeVault(vaultId: string): Promise<void>;
@@ -48,6 +49,7 @@ export interface NativeApi {
 }
 
 const tauriApi: NativeApi = {
+  setWindowEffect: (enabled, dark) => invoke("set_window_effect", { enabled, dark }),
   listVaults: () => invoke("list_vaults"),
   registerVault: (path) => invoke("register_vault", { path }),
   removeVault: (vaultId) => invoke("remove_vault", { vaultId }),
@@ -118,6 +120,9 @@ let nextHistoryId = 1;
 const mockHistory = new Map<number, { entry: HistoryEntry; content: string }>();
 
 const mockApi: NativeApi = {
+  async setWindowEffect() {
+    return;
+  },
   async listVaults() {
     return mockVaults;
   },
