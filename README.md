@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><strong>下载 macOS 版</strong></a>
+  <a href="../../releases/latest"><strong>下载安装包</strong></a>
   ·
   <a href="./docs/USER_GUIDE.md">使用说明</a>
   ·
@@ -94,14 +94,13 @@
 
 ## 下载与安装
 
-当前版本为 **0.3.1**，现提供适用于 **Apple 芯片 Mac** 的 DMG 安装包。
+当前版本为 **0.3.1**，安装包可在 [Releases](../../releases/latest) 页面下载：
 
-1. 前往 [Releases](../../releases/latest) 下载最新的 `.dmg`
-2. 打开 DMG，把“墨岛笔记”拖入“应用程序”
-3. 首版暂未进行 Apple 公证；如果 macOS 阻止首次启动，请在访达中右键应用并选择“打开”
-4. 选择一个本地文件夹作为资料库，开始写作
+- Apple 芯片 Mac：下载 `.dmg`，打开后把“墨岛笔记”拖入“应用程序”
+- Windows x64：普通用户建议下载 `.exe` 安装程序，也可以使用 `.msi`
+- 首版暂未进行代码签名；如果系统阻止首次启动，请确认文件来自本项目的 Releases 页面后按系统提示放行
 
-项目代码同时按 macOS 和 Windows 桌面端设计，并保留 Windows 自动构建配置；正式 Windows 安装包将在完成对应平台验收后提供。
+安装完成后，选择一个本地文件夹作为资料库即可开始写作。
 
 ## 当前边界
 
