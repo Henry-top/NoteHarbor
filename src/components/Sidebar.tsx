@@ -5,6 +5,7 @@ import {
   ChevronRight,
   FileText,
   FileType2,
+  File,
   Import,
   Folder,
   FolderOpen,
@@ -18,11 +19,12 @@ import {
 import { useMemo, useState } from "react";
 import { t } from "../i18n";
 import { HoverTip } from "./HoverTip";
-import type { LibraryItemSummary, Vault } from "../types";
+import type { LibraryItemSummary, Vault, VaultFolder } from "../types";
 
 interface SidebarProps {
   vaults: Vault[];
   items: LibraryItemSummary[];
+  folders: VaultFolder[];
   activeVaultId?: string;
   activePath?: string;
   indexProgress: Record<string, number>;
@@ -30,11 +32,12 @@ interface SidebarProps {
   onActivateVault: (vaultId: string) => void;
   onAddVault: () => void;
   onImportWord: (vaultId: string) => void;
-  onNewNote: (vaultId: string, kind?: "regular" | "daily") => void;
+  onNewNote: (vaultId: string, kind?: "regular" | "daily", targetDirectory?: string) => void;
   onSearch: () => void;
   onHide: () => void;
   onVaultMenu: (vault: Vault, anchor: HTMLElement) => void;
   onItemContextMenu: (item: LibraryItemSummary, position: { x: number; y: number }) => void;
+  onFolderContextMenu: (folder: VaultFolder, position: { x: number; y: number }) => void;
 }
 
 type TreeNode = {
@@ -47,6 +50,7 @@ type TreeNode = {
 export function Sidebar({
   vaults,
   items,
+  folders,
   activeVaultId,
   activePath,
   indexProgress,
@@ -58,7 +62,8 @@ export function Sidebar({
   onSearch,
   onHide,
   onVaultMenu,
-  onItemContextMenu
+  onItemContextMenu,
+  onFolderContextMenu
 }: SidebarProps) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [section, setSection] = useState<"all" | "recent" | "favorites" | "pinned">("all");
@@ -132,15 +137,22 @@ export function Sidebar({
           const key = `vault:${vault.id}`;
           const isCollapsed = collapsed.has(key);
           const vaultNotes = filteredNotes.filter((note) => note.vaultId === vault.id);
-          const tree = buildTree(vaultNotes);
+          const tree = buildTree(vaultNotes, folders.filter((folder) => folder.vaultId === vault.id));
           const progress = indexProgress[vault.id];
           return (
             <section className={`vault ${activeVaultId === vault.id ? "active-vault" : ""}`} key={vault.id}>
               <div
                 className="vault-row"
+                data-drop-vault-id={vault.id}
+                data-drop-directory=""
                 onClick={() => {
                   onActivateVault(vault.id);
                   toggle(key);
+                }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onVaultMenu(vault, event.currentTarget);
                 }}
               >
                 <button className="disclosure" aria-label={isCollapsed ? "展开" : "折叠"}>
@@ -173,6 +185,11 @@ export function Sidebar({
                   activePath={activeVaultId === vault.id ? activePath : undefined}
                   onSelect={onSelectItem}
                   onContextMenu={onItemContextMenu}
+                  onFolderContextMenu={(path, position) => {
+                    const folder = folders.find((item) => item.vaultId === vault.id && item.path === path);
+                    if (folder) onFolderContextMenu(folder, position);
+                  }}
+                  vaultId={vault.id}
                 />
               )}
               {!isCollapsed && vaultNotes.length === 0 && (
@@ -225,7 +242,9 @@ function Tree({
   toggle,
   activePath,
   onSelect,
-  onContextMenu
+  onContextMenu,
+  onFolderContextMenu,
+  vaultId
 }: {
   node: TreeNode;
   depth: number;
@@ -234,6 +253,8 @@ function Tree({
   activePath?: string;
   onSelect: (item: LibraryItemSummary) => void;
   onContextMenu: (item: LibraryItemSummary, position: { x: number; y: number }) => void;
+  onFolderContextMenu: (path: string, position: { x: number; y: number }) => void;
+  vaultId: string;
 }) {
   return (
     <div className="note-tree">
@@ -244,8 +265,15 @@ function Tree({
           <div key={folder.path}>
             <button
               className="tree-folder"
+              data-drop-vault-id={vaultId}
+              data-drop-directory={folder.path}
               style={{ paddingLeft: `${16 + depth * 14}px` }}
               onClick={() => toggle(key)}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onFolderContextMenu(folder.path, { x: event.clientX, y: event.clientY });
+              }}
             >
               {isCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
               <span>{folder.name}</span>
@@ -259,6 +287,8 @@ function Tree({
                 activePath={activePath}
                 onSelect={onSelect}
                 onContextMenu={onContextMenu}
+                onFolderContextMenu={onFolderContextMenu}
+                vaultId={vaultId}
               />
             )}
           </div>
@@ -276,7 +306,11 @@ function Tree({
             onContextMenu(item, { x: event.clientX, y: event.clientY });
           }}
         >
-          {item.kind === "markdown" ? <FileText size={14} /> : <FileType2 className="word-file-icon" size={14} />}
+          {item.kind === "markdown" || item.kind === "txt"
+            ? <FileText size={14} />
+            : item.kind === "docx" || item.kind === "doc"
+              ? <FileType2 className="word-file-icon" size={14} />
+              : <File size={14} />}
           <span>{item.title}</span>
           {item.isPinned && <Pin className="note-indicator" size={11} />}
         </button>
@@ -285,8 +319,18 @@ function Tree({
   );
 }
 
-function buildTree(items: LibraryItemSummary[]): TreeNode {
+function buildTree(items: LibraryItemSummary[], knownFolders: VaultFolder[]): TreeNode {
   const root: TreeNode = { name: "", path: "", folders: new Map(), items: [] };
+  for (const folderInfo of [...knownFolders].sort((a, b) => a.path.localeCompare(b.path, "zh-CN"))) {
+    let node = root;
+    for (const folder of folderInfo.path.split("/").filter(Boolean)) {
+      const path = node.path ? `${node.path}/${folder}` : folder;
+      if (!node.folders.has(folder)) {
+        node.folders.set(folder, { name: folder, path, folders: new Map(), items: [] });
+      }
+      node = node.folders.get(folder)!;
+    }
+  }
   for (const item of [...items].sort((a, b) => a.path.localeCompare(b.path, "zh-CN"))) {
     const parts = item.path.split("/");
     let node = root;

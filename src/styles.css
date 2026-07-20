@@ -2816,3 +2816,216 @@ kbd {
     backdrop-filter: none;
   }
 }
+.pdf-preview {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: color-mix(in srgb, var(--surface-2) 82%, var(--background));
+}
+
+.document-preview-toolbar {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  flex-wrap: wrap;
+}
+
+.document-preview-toolbar button,
+.pdf-page-controls,
+.pdf-search,
+.pdf-zoom {
+  display: inline-flex;
+  align-items: center;
+}
+
+.document-preview-toolbar button {
+  border: 0;
+  border-radius: 8px;
+  min-height: 32px;
+  padding: 0 9px;
+  color: var(--text-muted);
+  background: transparent;
+}
+
+.document-preview-toolbar button:hover:not(:disabled) {
+  color: var(--text-strong);
+  background: var(--surface-hover);
+}
+
+.pdf-page-controls,
+.pdf-search,
+.pdf-zoom {
+  gap: 5px;
+}
+
+.pdf-page-controls input {
+  width: 42px;
+  text-align: center;
+}
+
+.pdf-search {
+  flex: 1;
+  min-width: 180px;
+  max-width: 360px;
+  padding: 0 10px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.pdf-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+}
+
+.pdf-search span,
+.pdf-zoom span,
+.pdf-page-controls span {
+  color: var(--text-faint);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.open-external-button {
+  margin-left: auto;
+  gap: 6px;
+}
+
+.pdf-pages {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 28px max(24px, calc((100% - 900px) / 2)) 55vh;
+  scroll-behavior: smooth;
+}
+
+.pdf-page {
+  position: relative;
+  width: var(--pdf-page-width, 720px);
+  height: var(--pdf-page-height, 980px);
+  margin: 0 auto 24px;
+  background: white;
+  box-shadow: 0 8px 28px rgb(20 30 38 / 14%);
+  transition: box-shadow .18s ease;
+}
+
+.pdf-page.search-match {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 62%, transparent), 0 8px 28px rgb(20 30 38 / 14%);
+}
+
+.pdf-page canvas,
+.pdf-page .textLayer {
+  position: absolute;
+  inset: 0;
+}
+
+.pdf-page .textLayer {
+  overflow: hidden;
+  opacity: 1;
+  line-height: 1;
+  text-size-adjust: none;
+  transform-origin: 0 0;
+}
+
+.pdf-page .textLayer span {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+}
+
+.pdf-page .textLayer ::selection {
+  color: transparent;
+  background: color-mix(in srgb, var(--accent) 34%, transparent);
+}
+
+.pdf-page-number {
+  position: absolute;
+  left: 50%;
+  bottom: -20px;
+  transform: translateX(-50%);
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.drop-overlay {
+  position: fixed;
+  z-index: 800;
+  inset: 18px;
+  border: 2px dashed color-mix(in srgb, var(--accent) 64%, transparent);
+  border-radius: 20px;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  color: var(--text-strong);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  backdrop-filter: blur(16px);
+  pointer-events: none;
+  box-shadow: 0 16px 70px rgb(20 45 60 / 16%);
+}
+
+.drop-overlay svg {
+  color: var(--accent-strong);
+}
+
+.drop-overlay span {
+  color: var(--text-muted);
+}
+
+.attachment-list article {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 10px;
+  margin: 0 8px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.attachment-list article > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  flex: 1;
+}
+
+.attachment-list article strong,
+.attachment-list article span,
+.attachment-list article small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-list article span,
+.attachment-list article small {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.attachment-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.attachment-actions button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}

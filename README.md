@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version 0.3.4" src="https://img.shields.io/badge/version-0.3.4-3f7f99?style=flat-square">
+  <img alt="Version 0.4.0" src="https://img.shields.io/badge/version-0.4.0-3f7f99?style=flat-square">
   <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri&logoColor=white">
   <img alt="React" src="https://img.shields.io/badge/React-TypeScript-3178C6?style=flat-square&logo=react&logoColor=white">
   <img alt="Local first" src="https://img.shields.io/badge/data-local--first-5D876E?style=flat-square">
@@ -32,11 +32,11 @@
 
 墨岛笔记直接读写你选择的本地文件夹。每一篇 Markdown 笔记都是普通的 `.md` 文件，图片和文档也按清晰的目录保存。即使有一天不再使用墨岛笔记，你仍然可以用任何编辑器打开、整理和迁移自己的内容。
 
-但“文件自由”不代表要牺牲体验。三种编辑模式、跨资料库搜索、双向链接、自动保存、历史恢复、Word 预览和精心打磨的主题，都已经装进这个安静的桌面工作台。
+但“文件自由”不代表要牺牲体验。三种编辑模式、跨资料库搜索、双向链接、自动保存、历史恢复、Word/PDF 预览、拖拽整理和精心打磨的主题，都已经装进这个安静的桌面工作台。
 
 | 文件始终属于你 | 写作足够顺手 | 笔记与文档共处 |
 | --- | --- | --- |
-| 标准 Markdown、本地文件夹，不创建专有内容格式 | Markdown 原文、即时渲染、左右分栏随时切换 | Markdown、DOCX 和 DOC 在同一资料库中管理 |
+| 标准 Markdown/TXT、本地文件夹，不创建专有内容格式 | Markdown 原文、即时渲染、左右分栏随时切换 | Markdown、TXT、PDF 与 Word 在同一资料库中管理 |
 | 当前本地版无需登录，核心编辑功能不依赖网络 | 自动保存、历史快照、冲突保护 | DOCX 本地预览，原始 Word 文件不转换 |
 
 ## 不只是“能写 Markdown”
@@ -54,6 +54,14 @@
 - 使用 `[[笔记链接]]` 和 `[[目标|显示文字]]` 建立关联
 - 自动收集反向链接，笔记改名后同步更新本库内引用
 - 标签、收藏、置顶、最近笔记、每日笔记和快速新建
+- 从访达或文件资源管理器直接拖入文件；拖到编辑器时作为附件，拖到侧栏时作为资料库文件
+
+### TXT 和 PDF 也各得其所
+
+- `.txt` 保留原扩展名，同时拥有 Markdown 兼容渲染、三种编辑模式、搜索、自动保存和历史
+- PDF 在正常标签页中连续分页预览，支持 50%–200% 缩放、页码跳转、文本选择和文内查找
+- PDF 拖到编辑器时作为附件，拖到侧栏或工作区时作为正式资料库文件
+- PDF.js 随应用本地打包，预览不依赖 CDN，也不会上传文件
 
 ### Word 不必先变成 Markdown
 
@@ -78,6 +86,8 @@
 ├── 欢迎来到墨岛.md
 ├── 每日记录/
 │   └── 2026-07-20.md
+├── 随手记录.txt
+├── 参考资料.pdf
 ├── assets/
 │   ├── 20260720-a3f82c.png
 │   └── 20260720-f701bd.pdf
@@ -86,15 +96,16 @@
     └── 会议记录.doc
 ```
 
-- Markdown 文件是笔记内容的唯一真实来源
-- 图片与附件统一放在资料库根目录的 `assets/`
+- Markdown/TXT 文件是文本笔记内容的唯一真实来源
+- `assets/` 是外部附件的默认存放位置，不再决定文件是否显示在侧栏
+- 附件可以原地“转为资料库文件”；只有主动移动文件时才需要自动更新引用
 - Word 镜像放在 `documents/`，不会被转换或改写
 - 搜索索引、偏好设置和历史快照只保存在系统应用数据目录
 - 移除资料库不会删除文件；删除内容会进入系统废纸篓或回收站
 
 ## 下载与安装
 
-当前版本为 **0.3.4**，安装包可在 [Releases](../../releases/latest) 页面下载：
+当前版本为 **0.4.0**，安装包可在 [Releases](../../releases/latest) 页面下载：
 
 - Apple 芯片 Mac：下载 `.dmg`，打开后把“墨岛笔记”拖入“应用程序”
 - Windows x64：普通用户建议下载 `.exe` 安装程序，也可以使用 `.msi`
@@ -104,7 +115,7 @@
 
 ## 当前边界
 
-墨岛笔记目前专注于个人、本地的笔记与文档管理。`0.3.4` 暂不包含账户、云同步、多人协作、插件、移动端和知识图谱。
+墨岛笔记目前专注于个人、本地的笔记与文档管理。`0.4.0` 暂不包含账户、云同步、多人协作、插件、移动端和知识图谱。
 
 未来加入云同步后，使用同步服务将需要账号；现有本地资料库和 Markdown 格式不会因此改变。同步功能会建立在稳定笔记 ID 和原始文件之上，不会要求把现有 Markdown 迁移为私有格式。
 

@@ -121,7 +121,7 @@ export function EditorPane({
   }, [mode, onImportAttachment, onScrollRatio]);
 
   return (
-    <div className={`editor-pane editor-${mode}`}>
+    <div className={`editor-pane editor-${mode}`} data-drop-editor>
       <CodeMirror
         className="editor-codemirror"
         ref={editorRef}

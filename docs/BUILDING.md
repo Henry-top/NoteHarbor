@@ -18,7 +18,7 @@ pnpm desktop:dev
 
 仅预览界面时运行 `pnpm dev`。浏览器预览使用内置示例资料，不会访问真实文件。
 
-Word 导入、源文件监听、`.docx` 预览以及“使用本地默认软件打开”依赖 Tauri 原生能力，必须用 `pnpm desktop:dev` 验证；浏览器预览不能代表这些能力可用。
+文件拖拽、文件夹管理、Word 导入、源文件监听、DOCX/PDF 预览以及“使用本地默认软件打开”依赖 Tauri 原生能力，必须用 `pnpm desktop:dev` 验证；浏览器预览不能代表这些能力可用。
 
 ## 打包
 
@@ -38,12 +38,16 @@ pnpm tauri build --bundles nsis,msi
 
 ## 数据目录
 
-Markdown、`assets/` 和导入的 Word 副本位于用户选择的资料库；Word 副本统一保存在根目录 `documents/`。SQLite 索引、历史快照、应用偏好以及 Word 外部源路径位于操作系统的应用数据目录：
+Markdown、TXT、PDF、`assets/` 和导入的 Word 副本位于用户选择的资料库；Word 副本统一保存在根目录 `documents/`。SQLite 索引、文件角色、引用关系、历史快照、应用偏好以及 Word 外部源路径位于操作系统的应用数据目录：
 
 - macOS：`~/Library/Application Support/com.noteharbor.desktop/`
 - Windows：`%APPDATA%/com.noteharbor.desktop/`
 
-删除应用数据目录不会删除资料库中的 Markdown、附件或 Word 副本，但会清除索引、收藏/置顶状态、历史快照，以及用于继续单向同步 Word 的外部源路径记录。
+删除应用数据目录不会删除资料库中的 Markdown、TXT、PDF、附件或 Word 副本，但会清除索引、附件/资料库文件角色、收藏/置顶状态、历史快照，以及用于继续单向同步 Word 的外部源路径记录。
+
+## PDF 预览资源
+
+PDF.js 和 Worker 随应用本地打包，不使用 CDN。PDF 只在内存中解析，页面按接近可视区域的顺序延迟渲染；切换或关闭标签页时必须取消渲染任务并释放文档资源。内置预览上限为 50MB。
 
 ## Word 预览资源
 

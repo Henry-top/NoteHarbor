@@ -2,14 +2,18 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Backlink,
+  DroppedPathInfo,
+  FileReference,
   HistoryEntry,
+  ImportBatchResult,
   IndexProgress,
   LibraryItemSummary,
   NoteDocument,
   NoteSummary,
   SaveResult,
   SearchHit,
-  Vault
+  Vault,
+  VaultFolder
 } from "../types";
 import { makeNewNoteContent, splitFrontmatter } from "./markdown";
 
@@ -23,7 +27,7 @@ export interface NativeApi {
   scanVault(vaultId: string): Promise<LibraryItemSummary[]>;
   listLibraryItems(vaultId?: string): Promise<LibraryItemSummary[]>;
   listNotes(vaultId?: string): Promise<NoteSummary[]>;
-  createNote(vaultId: string, kind?: "regular" | "daily"): Promise<NoteDocument>;
+  createNote(vaultId: string, kind?: "regular" | "daily", targetDirectory?: string): Promise<NoteDocument>;
   readNote(vaultId: string, path: string): Promise<NoteDocument>;
   saveNote(vaultId: string, path: string, content: string, expectedRevision: string, force?: boolean): Promise<SaveResult>;
   saveCopy(vaultId: string, path: string, content: string): Promise<NoteDocument>;
@@ -44,6 +48,20 @@ export interface NativeApi {
   relinkLibraryFile(vaultId: string, path: string, sourcePath: string): Promise<LibraryItemSummary>;
   renameLibraryFile(vaultId: string, path: string, newName: string): Promise<LibraryItemSummary>;
   deleteLibraryFile(vaultId: string, path: string): Promise<void>;
+  inspectDroppedPaths(paths: string[]): Promise<DroppedPathInfo[]>;
+  importTextDocuments(vaultId: string, targetDirectory: string, sourcePaths: string[]): Promise<ImportBatchResult>;
+  importLibraryFiles(vaultId: string, targetDirectory: string, sourcePaths: string[]): Promise<ImportBatchResult>;
+  importAttachmentsFromPaths(vaultId: string, notePath: string, sourcePaths: string[]): Promise<ImportBatchResult>;
+  promoteAttachment(vaultId: string, path: string): Promise<LibraryItemSummary>;
+  moveVaultFile(vaultId: string, path: string, targetDirectory: string): Promise<LibraryItemSummary>;
+  listFileReferences(vaultId: string, sourcePath?: string, targetPath?: string): Promise<FileReference[]>;
+  readPdfPreview(vaultId: string, path: string): Promise<number[]>;
+  openVaultPath(vaultId: string, path: string): Promise<void>;
+  listVaultFolders(vaultId: string): Promise<VaultFolder[]>;
+  createVaultFolder(vaultId: string, parentPath: string, name: string): Promise<VaultFolder>;
+  renameVaultFolder(vaultId: string, path: string, newName: string): Promise<LibraryItemSummary[]>;
+  deleteVaultFolder(vaultId: string, path: string): Promise<void>;
+  revealVaultFolder(vaultId: string, path: string): Promise<void>;
   onIndexProgress(handler: (progress: IndexProgress) => void): Promise<UnlistenFn>;
   onVaultChanged(handler: (vaultId: string) => void): Promise<UnlistenFn>;
 }
@@ -56,8 +74,8 @@ const tauriApi: NativeApi = {
   scanVault: (vaultId) => invoke("scan_vault", { vaultId }),
   listLibraryItems: (vaultId) => invoke("list_library_items", { vaultId }),
   listNotes: (vaultId) => invoke("list_notes", { vaultId }),
-  createNote: async (vaultId, kind = "regular") =>
-    normalizeMarkdownDocument(await invoke<NoteDocument>("create_note", { vaultId, kind })),
+  createNote: async (vaultId, kind = "regular", targetDirectory) =>
+    normalizeMarkdownDocument(await invoke<NoteDocument>("create_note", { vaultId, kind, targetDirectory })),
   readNote: async (vaultId, path) =>
     normalizeMarkdownDocument(await invoke<NoteDocument>("read_note", { vaultId, path })),
   saveNote: async (vaultId, path, content, expectedRevision, force = false) => {
@@ -94,6 +112,27 @@ const tauriApi: NativeApi = {
   renameLibraryFile: (vaultId, path, newName) =>
     invoke("rename_library_file", { vaultId, path, newName }),
   deleteLibraryFile: (vaultId, path) => invoke("delete_library_file", { vaultId, path }),
+  inspectDroppedPaths: (paths) => invoke("inspect_dropped_paths", { paths }),
+  importTextDocuments: (vaultId, targetDirectory, sourcePaths) =>
+    invoke("import_text_documents", { vaultId, targetDirectory, sourcePaths }),
+  importLibraryFiles: (vaultId, targetDirectory, sourcePaths) =>
+    invoke("import_library_files", { vaultId, targetDirectory, sourcePaths }),
+  importAttachmentsFromPaths: (vaultId, notePath, sourcePaths) =>
+    invoke("import_attachments_from_paths", { vaultId, notePath, sourcePaths }),
+  promoteAttachment: (vaultId, path) => invoke("promote_attachment", { vaultId, path }),
+  moveVaultFile: (vaultId, path, targetDirectory) =>
+    invoke("move_vault_file", { vaultId, path, targetDirectory }),
+  listFileReferences: (vaultId, sourcePath, targetPath) =>
+    invoke("list_file_references", { vaultId, sourcePath, targetPath }),
+  readPdfPreview: (vaultId, path) => invoke("read_pdf_preview", { vaultId, path }),
+  openVaultPath: (vaultId, path) => invoke("open_vault_path", { vaultId, path }),
+  listVaultFolders: (vaultId) => invoke("list_vault_folders", { vaultId }),
+  createVaultFolder: (vaultId, parentPath, name) =>
+    invoke("create_vault_folder", { vaultId, parentPath, name }),
+  renameVaultFolder: (vaultId, path, newName) =>
+    invoke("rename_vault_folder", { vaultId, path, newName }),
+  deleteVaultFolder: (vaultId, path) => invoke("delete_vault_folder", { vaultId, path }),
+  revealVaultFolder: (vaultId, path) => invoke("reveal_vault_folder", { vaultId, path }),
   onIndexProgress: async (handler) => listen<IndexProgress>("index://progress", (event) => handler(event.payload)),
   onVaultChanged: async (handler) => listen<{ vaultId: string }>("vault://changed", (event) => handler(event.payload.vaultId))
 };
@@ -288,6 +327,48 @@ const mockApi: NativeApi = {
   async deleteLibraryFile() {
     throw { code: "TAURI_REQUIRED", message: "浏览器预览模式不能删除 Word 文档" };
   },
+  async inspectDroppedPaths() {
+    return [];
+  },
+  async importTextDocuments() {
+    throw { code: "TAURI_REQUIRED", message: "请在桌面应用中导入文件" };
+  },
+  async importLibraryFiles() {
+    throw { code: "TAURI_REQUIRED", message: "请在桌面应用中导入文件" };
+  },
+  async importAttachmentsFromPaths() {
+    throw { code: "TAURI_REQUIRED", message: "请在桌面应用中导入附件" };
+  },
+  async promoteAttachment() {
+    throw { code: "TAURI_REQUIRED", message: "请在桌面应用中管理附件" };
+  },
+  async moveVaultFile() {
+    throw { code: "TAURI_REQUIRED", message: "请在桌面应用中移动文件" };
+  },
+  async listFileReferences() {
+    return [];
+  },
+  async readPdfPreview() {
+    throw { code: "TAURI_REQUIRED", message: "浏览器预览模式不能读取 PDF" };
+  },
+  async openVaultPath() {
+    throw { code: "TAURI_REQUIRED", message: "请在桌面应用中打开文件" };
+  },
+  async listVaultFolders() {
+    return [];
+  },
+  async createVaultFolder() {
+    throw { code: "TAURI_REQUIRED", message: "请在桌面应用中管理文件夹" };
+  },
+  async renameVaultFolder() {
+    throw { code: "TAURI_REQUIRED", message: "请在桌面应用中管理文件夹" };
+  },
+  async deleteVaultFolder() {
+    throw { code: "TAURI_REQUIRED", message: "请在桌面应用中管理文件夹" };
+  },
+  async revealVaultFolder() {
+    throw { code: "TAURI_REQUIRED", message: "请在桌面应用中显示文件夹" };
+  },
   async onIndexProgress() {
     return () => undefined;
   },
@@ -300,7 +381,7 @@ export const api: NativeApi = isTauri() ? tauriApi : mockApi;
 export const runningInTauri = isTauri();
 
 function normalizeMarkdownDocument(document: NoteDocument): NoteDocument {
-  return { ...document, kind: "markdown" };
+  return { ...document, kind: document.kind === "txt" ? "txt" : "markdown" };
 }
 
 function mockDocument(
@@ -314,7 +395,7 @@ function mockDocument(
     vaultId,
     path,
     title: titleFromPath(path),
-    kind: "markdown",
+    kind: path.toLowerCase().endsWith(".txt") ? "txt" : "markdown",
     tags: frontmatter.tags,
     modifiedAt: new Date().toISOString(),
     isFavorite: previous?.isFavorite ?? false,
@@ -326,5 +407,5 @@ function mockDocument(
 }
 
 function titleFromPath(path: string): string {
-  return path.split("/").at(-1)?.replace(/\.md$/i, "") || path;
+  return path.split("/").at(-1)?.replace(/\.(md|txt)$/i, "") || path;
 }

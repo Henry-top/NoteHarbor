@@ -16,7 +16,7 @@ const steps = [
   {
     eyebrow: "欢迎来到墨岛笔记",
     title: "你的文字，停泊在自己手中",
-    description: "墨岛笔记以本地文件为中心。无需账户，也不会把笔记上传到网络。",
+    description: "墨岛笔记当前以本地文件为中心，本地版无需账户，也不会把笔记上传到网络。",
     icon: Sparkles,
     points: [
       { icon: ShieldCheck, text: "内容保存在你选择的本地文件夹" },

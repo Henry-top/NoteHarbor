@@ -32,13 +32,70 @@ struct LibraryFileChanged {
 }
 
 pub(super) fn init_library_files_schema(db: &Connection) -> AppResult<()> {
+    let legacy_schema: Option<String> = db
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'library_files'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    if legacy_schema
+        .as_deref()
+        .is_some_and(|sql| sql.contains("kind IN ('docx', 'doc')"))
+    {
+        db.execute_batch(
+            "
+            ALTER TABLE library_files RENAME TO library_files_legacy;
+            CREATE TABLE library_files (
+              id TEXT PRIMARY KEY,
+              vault_id TEXT NOT NULL,
+              path TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              role TEXT NOT NULL DEFAULT 'library' CHECK (role IN ('attachment', 'library')),
+              original_name TEXT,
+              extension TEXT,
+              mime_type TEXT,
+              source_path TEXT,
+              size_bytes INTEGER NOT NULL DEFAULT 0,
+              content_hash TEXT NOT NULL DEFAULT '',
+              modified_at TEXT NOT NULL,
+              modified_unix INTEGER NOT NULL,
+              favorite INTEGER NOT NULL DEFAULT 0,
+              pinned INTEGER NOT NULL DEFAULT 0,
+              last_opened TEXT,
+              last_synced_at TEXT,
+              sync_status TEXT NOT NULL DEFAULT 'unlinked',
+              sync_error TEXT,
+              UNIQUE (vault_id, path),
+              FOREIGN KEY (vault_id) REFERENCES vaults(id) ON DELETE CASCADE
+            );
+            INSERT INTO library_files (
+              id, vault_id, path, kind, role, original_name, extension, mime_type,
+              source_path, size_bytes, content_hash, modified_at, modified_unix,
+              favorite, pinned, last_opened, last_synced_at, sync_status, sync_error
+            )
+            SELECT id, vault_id, path, kind, 'library',
+              path, lower(substr(path, instr(path, '.') + 1)), NULL,
+              source_path, size_bytes, content_hash, modified_at, modified_unix,
+              favorite, pinned, last_opened, last_synced_at, sync_status, sync_error
+            FROM library_files_legacy;
+            DROP TABLE library_files_legacy;
+            ",
+        )
+        .map_err(db_error)?;
+    }
     db.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS library_files (
           id TEXT PRIMARY KEY,
           vault_id TEXT NOT NULL,
           path TEXT NOT NULL,
-          kind TEXT NOT NULL CHECK (kind IN ('docx', 'doc')),
+          kind TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'library' CHECK (role IN ('attachment', 'library')),
+          original_name TEXT,
+          extension TEXT,
+          mime_type TEXT,
           source_path TEXT,
           size_bytes INTEGER NOT NULL DEFAULT 0,
           content_hash TEXT NOT NULL DEFAULT '',
@@ -57,6 +114,21 @@ pub(super) fn init_library_files_schema(db: &Connection) -> AppResult<()> {
           ON library_files(modified_unix DESC);
         CREATE INDEX IF NOT EXISTS idx_library_files_source
           ON library_files(source_path);
+        CREATE INDEX IF NOT EXISTS idx_library_files_role
+          ON library_files(vault_id, role);
+        CREATE TABLE IF NOT EXISTS file_references (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          vault_id TEXT NOT NULL,
+          source_path TEXT NOT NULL,
+          target_path TEXT NOT NULL,
+          raw_target TEXT NOT NULL,
+          link_type TEXT NOT NULL,
+          resolved INTEGER NOT NULL DEFAULT 1,
+          UNIQUE (vault_id, source_path, raw_target, link_type),
+          FOREIGN KEY (vault_id) REFERENCES vaults(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_file_references_target
+          ON file_references(vault_id, target_path);
         ",
     )
     .map_err(db_error)
@@ -90,7 +162,8 @@ pub(super) fn index_scanned_word_file(
     root: &Path,
     path: &Path,
 ) -> AppResult<()> {
-    let kind = LibraryItemKind::from_word_path(path)
+    let kind = LibraryItemKind::from_path(path)
+        .filter(|kind| kind.is_word())
         .ok_or_else(|| app_error("UNSUPPORTED_FILE_TYPE", "只支持 DOCX 和 DOC 文档"))?;
     let relative = relative_string(root, path)?;
     let metadata = fs::metadata(path).map_err(io_error)?;
@@ -137,7 +210,7 @@ pub(super) fn prune_missing_word_files(
     let rows = {
         let db = state.db.lock().map_err(lock_error)?;
         let mut statement = db
-            .prepare("SELECT id, path, source_path FROM library_files WHERE vault_id = ?1")
+            .prepare("SELECT id, path, source_path FROM library_files WHERE vault_id = ?1 AND kind IN ('docx', 'doc')")
             .map_err(db_error)?;
         let rows = statement
             .query_map([vault_id], |row| {
@@ -214,22 +287,18 @@ pub(super) fn list_word_items_inner(
     let db = state.db.lock().map_err(lock_error)?;
     let sql = if vault_id.is_some() {
         "SELECT vault_id, path, kind, modified_at, favorite, pinned, last_opened,
-                source_path, size_bytes, sync_status, last_synced_at
-         FROM library_files WHERE vault_id = ?1"
+                source_path, size_bytes, sync_status, last_synced_at, role, mime_type, original_name
+         FROM library_files WHERE vault_id = ?1 AND role = 'library'"
     } else {
         "SELECT vault_id, path, kind, modified_at, favorite, pinned, last_opened,
-                source_path, size_bytes, sync_status, last_synced_at
-         FROM library_files"
+                source_path, size_bytes, sync_status, last_synced_at, role, mime_type, original_name
+         FROM library_files WHERE role = 'library'"
     };
     let mut statement = db.prepare(sql).map_err(db_error)?;
     let mapper = |row: &rusqlite::Row<'_>| -> rusqlite::Result<LibraryItemSummary> {
         let path: String = row.get(1)?;
         let kind_text: String = row.get(2)?;
-        let kind = if kind_text == "doc" {
-            LibraryItemKind::Doc
-        } else {
-            LibraryItemKind::Docx
-        };
+        let kind = LibraryItemKind::from_db(&kind_text);
         Ok(LibraryItemSummary {
             vault_id: row.get(0)?,
             title: title_from_path(Path::new(&path)),
@@ -244,6 +313,9 @@ pub(super) fn list_word_items_inner(
             size_bytes: row.get::<_, i64>(8)?.max(0) as u64,
             sync_status: row.get(9)?,
             last_synced_at: row.get(10)?,
+            role: row.get(11)?,
+            mime_type: row.get(12)?,
+            original_name: row.get(13)?,
         })
     };
     let items = if let Some(id) = vault_id {
@@ -272,7 +344,7 @@ pub(super) fn search_word_items(
     let mut statement = db
         .prepare(
             "SELECT vault_id, path, kind FROM library_files
-             WHERE path LIKE ?1 ESCAPE '\\'
+             WHERE role = 'library' AND path LIKE ?1 ESCAPE '\\'
              ORDER BY modified_unix DESC LIMIT 100",
         )
         .map_err(db_error)?;
@@ -288,11 +360,7 @@ pub(super) fn search_word_items(
                 path,
                 tags: Vec::new(),
                 score: 1.0,
-                kind: if kind == "doc" {
-                    LibraryItemKind::Doc
-                } else {
-                    LibraryItemKind::Docx
-                },
+                kind: LibraryItemKind::from_db(&kind),
             })
         })
         .map_err(db_error)?
@@ -345,7 +413,8 @@ pub(crate) fn import_word_documents(
         if !metadata.is_file() {
             return Err(app_error("SOURCE_NOT_FILE", "只能导入普通文件"));
         }
-        let kind = LibraryItemKind::from_word_path(&canonical)
+        let kind = LibraryItemKind::from_path(&canonical)
+            .filter(|kind| kind.is_word())
             .ok_or_else(|| app_error("UNSUPPORTED_FILE_TYPE", "只支持 .docx 和 .doc 文件"))?;
         if canonical.starts_with(&root) {
             return Err(app_error(
@@ -520,7 +589,8 @@ pub(crate) fn relink_library_file(
     if !fs::metadata(&source).map_err(io_error)?.is_file() {
         return Err(app_error("SOURCE_NOT_FILE", "只能关联普通文件"));
     }
-    let source_kind = LibraryItemKind::from_word_path(&source)
+    let source_kind = LibraryItemKind::from_path(&source)
+        .filter(|kind| kind.is_word())
         .ok_or_else(|| app_error("UNSUPPORTED_FILE_TYPE", "只支持 .docx 和 .doc 文件"))?;
     if source_kind != record.kind {
         return Err(app_error(
@@ -562,35 +632,7 @@ pub(crate) fn rename_library_file(
     path: String,
     new_name: String,
 ) -> AppResult<LibraryItemSummary> {
-    let record = registered_word_record(&state, &vault_id, &path)?;
-    let cleaned = sanitize_word_name(&new_name, record.kind)?;
-    let old_absolute = registered_vault_copy_path(&record, true)?;
-    let parent = old_absolute
-        .parent()
-        .ok_or_else(|| app_error("INVALID_PATH", "文档路径无效"))?;
-    let extension = record.kind.as_str();
-    let new_absolute = parent.join(format!("{cleaned}.{extension}"));
-    if new_absolute.exists() {
-        return Err(app_error("FILE_ALREADY_EXISTS", "同名文档已经存在"));
-    }
-    let new_relative = relative_string(&record.vault_root, &new_absolute)?;
-    let update = state.db.lock().map_err(lock_error)?.execute(
-        "UPDATE library_files SET path = ?1 WHERE id = ?2",
-        params![new_relative, record.id],
-    );
-    if let Err(error) = update {
-        return Err(db_error(error));
-    }
-    if let Err(error) = fs::rename(&old_absolute, &new_absolute) {
-        let _ = state.db.lock().map(|db| {
-            db.execute(
-                "UPDATE library_files SET path = ?1 WHERE id = ?2",
-                params![record.path, record.id],
-            )
-        });
-        return Err(io_error(error));
-    }
-    word_summary_by_id(&state, &record.id)
+    file_manager::rename_generic_library_file(&state, &vault_id, &path, &new_name)
 }
 
 #[tauri::command]
@@ -599,6 +641,9 @@ pub(crate) fn delete_library_file(
     vault_id: String,
     path: String,
 ) -> AppResult<()> {
+    if !LibraryItemKind::from_path(Path::new(&path)).is_some_and(|kind| kind.is_word()) {
+        return file_manager::delete_generic_library_file(&state, &vault_id, &path);
+    }
     let record = registered_word_record(&state, &vault_id, &path)?;
     let absolute = registered_vault_copy_path(&record, false)?;
     if absolute.exists() {
@@ -749,7 +794,7 @@ fn registered_word_record(
     db.query_row(
         "SELECT f.id, f.vault_id, v.path, f.path, f.kind, f.source_path
          FROM library_files f JOIN vaults v ON v.id = f.vault_id
-         WHERE f.vault_id = ?1 AND f.path = ?2",
+         WHERE f.vault_id = ?1 AND f.path = ?2 AND f.kind IN ('docx', 'doc')",
         params![vault_id, path],
         map_word_record,
     )
@@ -762,10 +807,12 @@ fn word_records(state: &AppState, vault_id: Option<&str>) -> AppResult<Vec<WordF
     let db = state.db.lock().map_err(lock_error)?;
     let sql = if vault_id.is_some() {
         "SELECT f.id, f.vault_id, v.path, f.path, f.kind, f.source_path
-         FROM library_files f JOIN vaults v ON v.id = f.vault_id WHERE f.vault_id = ?1"
+         FROM library_files f JOIN vaults v ON v.id = f.vault_id
+         WHERE f.vault_id = ?1 AND f.kind IN ('docx', 'doc')"
     } else {
         "SELECT f.id, f.vault_id, v.path, f.path, f.kind, f.source_path
-         FROM library_files f JOIN vaults v ON v.id = f.vault_id"
+         FROM library_files f JOIN vaults v ON v.id = f.vault_id
+         WHERE f.kind IN ('docx', 'doc')"
     };
     let mut statement = db.prepare(sql).map_err(db_error)?;
     let records = if let Some(id) = vault_id {
@@ -791,11 +838,7 @@ fn map_word_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<WordFileRecord> 
         vault_id: row.get(1)?,
         vault_root: PathBuf::from(row.get::<_, String>(2)?),
         path: row.get(3)?,
-        kind: if kind == "doc" {
-            LibraryItemKind::Doc
-        } else {
-            LibraryItemKind::Docx
-        },
+        kind: LibraryItemKind::from_db(&kind),
         source_path: row.get(5)?,
     })
 }
@@ -804,7 +847,7 @@ fn word_summary_by_id(state: &AppState, id: &str) -> AppResult<LibraryItemSummar
     let db = state.db.lock().map_err(lock_error)?;
     db.query_row(
         "SELECT vault_id, path, kind, modified_at, favorite, pinned, last_opened,
-                source_path, size_bytes, sync_status, last_synced_at
+                source_path, size_bytes, sync_status, last_synced_at, role, mime_type, original_name
          FROM library_files WHERE id = ?1",
         [id],
         |row| {
@@ -814,11 +857,7 @@ fn word_summary_by_id(state: &AppState, id: &str) -> AppResult<LibraryItemSummar
                 vault_id: row.get(0)?,
                 title: title_from_path(Path::new(&path)),
                 path,
-                kind: if kind == "doc" {
-                    LibraryItemKind::Doc
-                } else {
-                    LibraryItemKind::Docx
-                },
+                kind: LibraryItemKind::from_db(&kind),
                 tags: Vec::new(),
                 modified_at: row.get(3)?,
                 is_favorite: row.get::<_, i64>(4)? != 0,
@@ -828,6 +867,9 @@ fn word_summary_by_id(state: &AppState, id: &str) -> AppResult<LibraryItemSummar
                 size_bytes: row.get::<_, i64>(8)?.max(0) as u64,
                 sync_status: row.get(9)?,
                 last_synced_at: row.get(10)?,
+                role: row.get(11)?,
+                mime_type: row.get(12)?,
+                original_name: row.get(13)?,
             })
         },
     )
@@ -883,7 +925,7 @@ fn is_safe_relative_word_path(value: &str) -> bool {
                 Component::ParentDir | Component::RootDir | Component::Prefix(_)
             )
         })
-        && LibraryItemKind::from_word_path(path).is_some()
+        && LibraryItemKind::from_path(path).is_some_and(|kind| kind.is_word())
 }
 
 #[cfg(test)]
@@ -956,6 +998,7 @@ fn unique_import_target(
     }
 }
 
+#[cfg(test)]
 fn sanitize_word_name(value: &str, kind: LibraryItemKind) -> AppResult<String> {
     let trimmed = value.trim();
     let suffix = format!(".{}", kind.as_str());
@@ -1372,5 +1415,55 @@ mod tests {
         validate_docx_archive(&bytes).unwrap();
         assert_eq!(original_hash, hash_file(sample).unwrap());
         assert_eq!(original_hash, hash_file(&copied).unwrap());
+    }
+
+    #[test]
+    fn migrates_word_only_records_to_the_unified_file_schema() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "
+            CREATE TABLE vaults (id TEXT PRIMARY KEY);
+            INSERT INTO vaults (id) VALUES ('vault');
+            CREATE TABLE library_files (
+              id TEXT PRIMARY KEY,
+              vault_id TEXT NOT NULL,
+              path TEXT NOT NULL,
+              kind TEXT NOT NULL CHECK (kind IN ('docx', 'doc')),
+              source_path TEXT,
+              size_bytes INTEGER NOT NULL DEFAULT 0,
+              content_hash TEXT NOT NULL DEFAULT '',
+              modified_at TEXT NOT NULL,
+              modified_unix INTEGER NOT NULL,
+              favorite INTEGER NOT NULL DEFAULT 0,
+              pinned INTEGER NOT NULL DEFAULT 0,
+              last_opened TEXT,
+              last_synced_at TEXT,
+              sync_status TEXT NOT NULL DEFAULT 'unlinked',
+              sync_error TEXT,
+              UNIQUE (vault_id, path)
+            );
+            INSERT INTO library_files (
+              id, vault_id, path, kind, modified_at, modified_unix
+            ) VALUES ('word', 'vault', 'documents/方案.docx', 'docx', '2026-01-01', 1);
+            ",
+        )
+        .unwrap();
+
+        init_library_files_schema(&db).unwrap();
+        let migrated: (String, String) = db
+            .query_row(
+                "SELECT role, kind FROM library_files WHERE id = 'word'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(migrated, ("library".into(), "docx".into()));
+        db.execute(
+            "INSERT INTO library_files (
+               id, vault_id, path, kind, role, modified_at, modified_unix
+             ) VALUES ('pdf', 'vault', '资料.pdf', 'pdf', 'library', '2026-01-01', 1)",
+            [],
+        )
+        .unwrap();
     }
 }

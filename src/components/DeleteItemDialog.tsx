@@ -6,6 +6,7 @@ export function DeleteItemDialog({
   actionLabel,
   busy,
   error,
+  referenceCount = 0,
   onCancel,
   onConfirm
 }: {
@@ -13,6 +14,7 @@ export function DeleteItemDialog({
   actionLabel: string;
   busy: boolean;
   error?: string;
+  referenceCount?: number;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -23,6 +25,9 @@ export function DeleteItemDialog({
         <div className="dialog-icon danger-icon"><Trash2 size={21} /></div>
         <h2>{actionLabel}</h2>
         <p>“{item.title}”可以从系统的{actionLabel.includes("废纸篓") ? "废纸篓" : "回收站"}恢复。</p>
+        {referenceCount > 0 && (
+          <p className="delete-reference-warning">它仍被 {referenceCount} 篇笔记引用，删除后这些链接会失效。</p>
+        )}
         {error && <div className="rename-error" role="alert">{error}</div>}
         <div className="dialog-actions">
           <button disabled={busy} onClick={onCancel}>取消</button>

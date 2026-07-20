@@ -21,8 +21,15 @@ use tempfile::NamedTempFile;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+mod file_manager;
 mod word_files;
 
+use file_manager::{
+    create_vault_folder, delete_vault_folder, import_attachments_from_paths, import_library_files,
+    import_text_documents, inspect_dropped_paths, list_file_references, list_vault_folders,
+    move_vault_file, open_vault_path, promote_attachment, read_pdf_preview, rename_vault_folder,
+    reveal_vault_folder,
+};
 use word_files::{
     delete_library_file, import_word_documents, open_library_file, read_docx_preview,
     read_word_document, relink_library_file, rename_library_file, sync_library_file,
@@ -66,30 +73,59 @@ struct NoteSummary {
     is_favorite: bool,
     is_pinned: bool,
     last_opened: Option<String>,
+    kind: LibraryItemKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum LibraryItemKind {
     Markdown,
+    Txt,
     Docx,
     Doc,
+    Pdf,
+    File,
 }
 
 impl LibraryItemKind {
-    fn from_word_path(path: &Path) -> Option<Self> {
+    fn from_path(path: &Path) -> Option<Self> {
         match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+            "md" => Some(Self::Markdown),
+            "txt" => Some(Self::Txt),
             "docx" => Some(Self::Docx),
             "doc" => Some(Self::Doc),
-            _ => None,
+            "pdf" => Some(Self::Pdf),
+            _ => Some(Self::File),
         }
+    }
+
+    fn is_text(self) -> bool {
+        matches!(self, Self::Markdown | Self::Txt)
+    }
+
+    fn is_word(self) -> bool {
+        matches!(self, Self::Docx | Self::Doc)
     }
 
     fn as_str(self) -> &'static str {
         match self {
             Self::Markdown => "markdown",
+            Self::Txt => "txt",
             Self::Docx => "docx",
             Self::Doc => "doc",
+            Self::Pdf => "pdf",
+            Self::File => "file",
+        }
+    }
+
+    fn from_db(value: &str) -> Self {
+        match value {
+            "txt" => Self::Txt,
+            "docx" => Self::Docx,
+            "doc" => Self::Doc,
+            "pdf" => Self::Pdf,
+            "file" => Self::File,
+            _ => Self::Markdown,
         }
     }
 }
@@ -110,6 +146,9 @@ struct LibraryItemSummary {
     size_bytes: u64,
     sync_status: String,
     last_synced_at: Option<String>,
+    role: String,
+    mime_type: Option<String>,
+    original_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -287,8 +326,10 @@ fn scan_vault(
                 .and_then(|value| value.to_str())
                 .is_some_and(|value| {
                     value.eq_ignore_ascii_case("md")
+                        || value.eq_ignore_ascii_case("txt")
                         || value.eq_ignore_ascii_case("docx")
                         || value.eq_ignore_ascii_case("doc")
+                        || value.eq_ignore_ascii_case("pdf")
                 })
         })
         .filter(|path| !is_ignored_path(path, &root))
@@ -299,16 +340,15 @@ fn scan_vault(
     let mut found_word_files = HashSet::new();
     for (index, path) in files.iter().enumerate() {
         let relative = relative_string(&root, path)?;
-        if path
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case("md"))
-        {
+        let kind = LibraryItemKind::from_path(path).unwrap_or(LibraryItemKind::File);
+        if kind.is_text() {
             found_notes.insert(relative);
             index_file(&state, &vault_id, &root, path)?;
-        } else {
+        } else if kind.is_word() {
             found_word_files.insert(relative);
             word_files::index_scanned_word_file(&state, &vault_id, &root, path)?;
+        } else if !relative.starts_with("assets/") {
+            file_manager::register_scanned_library_file(&state, &vault_id, &root, path)?;
         }
         if index % 25 == 0 || index + 1 == total {
             let _ = app.emit(
@@ -346,6 +386,7 @@ fn scan_vault(
         .map_err(db_error)?;
     }
     word_files::prune_missing_word_files(&state, &vault_id, &found_word_files)?;
+    file_manager::reconcile_asset_records(&state, &vault_id, &root)?;
 
     ensure_watcher(&app, &state, &vault)?;
     list_library_items_inner(&state, Some(&vault_id))
@@ -365,18 +406,29 @@ fn list_library_items(
 }
 
 #[tauri::command]
-fn create_note(state: State<AppState>, vault_id: String, kind: String) -> AppResult<NoteDocument> {
+fn create_note(
+    state: State<AppState>,
+    vault_id: String,
+    kind: String,
+    target_directory: Option<String>,
+) -> AppResult<NoteDocument> {
     let vault = get_vault(&state, &vault_id)?;
     let root = PathBuf::from(&vault.path);
     let (directory, base_name) = if kind == "daily" {
-        ("Daily", Utc::now().format("%Y-%m-%d").to_string())
+        (
+            "Daily".to_string(),
+            Utc::now().format("%Y-%m-%d").to_string(),
+        )
     } else {
-        ("", "未命名笔记".to_string())
+        (
+            target_directory.unwrap_or_default(),
+            "未命名笔记".to_string(),
+        )
     };
     let folder = if directory.is_empty() {
-        root.clone()
+        fs::canonicalize(&root).map_err(io_error)?
     } else {
-        root.join(directory)
+        file_manager::safe_vault_directory(&root, &directory, true)?
     };
     fs::create_dir_all(&folder).map_err(io_error)?;
 
@@ -482,7 +534,11 @@ fn save_copy(
         } else {
             format!(" - 副本 {counter}")
         };
-        let candidate = parent.join(format!("{stem}{suffix}.md"));
+        let extension = original
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("md");
+        let candidate = parent.join(format!("{stem}{suffix}.{extension}"));
         if !candidate.exists() {
             break candidate;
         }
@@ -507,7 +563,11 @@ fn rename_note(
     let parent = old_absolute
         .parent()
         .ok_or_else(|| app_error("INVALID_PATH", "笔记路径无效"))?;
-    let new_absolute = parent.join(format!("{cleaned}.md"));
+    let extension = old_absolute
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("md");
+    let new_absolute = parent.join(format!("{cleaned}.{extension}"));
     let old_title = old_absolute
         .file_stem()
         .and_then(|value| value.to_str())
@@ -533,7 +593,9 @@ fn rename_note(
         .filter(|file| {
             file.extension()
                 .and_then(|value| value.to_str())
-                .is_some_and(|value| value.eq_ignore_ascii_case("md"))
+                .is_some_and(|value| {
+                    value.eq_ignore_ascii_case("md") || value.eq_ignore_ascii_case("txt")
+                })
         })
         .collect();
 
@@ -665,17 +727,6 @@ fn resolve_library_item_path(root: &Path, path: &str) -> AppResult<PathBuf> {
     {
         return Err(app_error("INVALID_PATH", "文件路径不能离开资料库"));
     }
-    let allowed = relative
-        .extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|value| {
-            value.eq_ignore_ascii_case("md")
-                || value.eq_ignore_ascii_case("docx")
-                || value.eq_ignore_ascii_case("doc")
-        });
-    if !allowed {
-        return Err(app_error("INVALID_PATH", "只能显示资料库中的笔记或文档"));
-    }
     let absolute = fs::canonicalize(root.join(relative))
         .map_err(|_| app_error("FILE_NOT_FOUND", "文件不存在"))?;
     if !absolute.starts_with(&root) || !absolute.is_file() {
@@ -705,7 +756,9 @@ fn search_notes(
         .prepare(
             "SELECT vault_id, path, title,
                     snippet(notes_fts, 4, '<mark>', '</mark>', ' … ', 18),
-                    tags, bm25(notes_fts)
+                    tags, bm25(notes_fts),
+                    COALESCE((SELECT kind FROM notes n
+                      WHERE n.vault_id = notes_fts.vault_id AND n.path = notes_fts.path), 'markdown')
              FROM notes_fts
              WHERE notes_fts MATCH ?1
              ORDER BY bm25(notes_fts)
@@ -722,7 +775,7 @@ fn search_notes(
                 snippet: row.get(3)?,
                 tags: serde_json::from_str(&tags_json).unwrap_or_default(),
                 score: row.get::<_, f64>(5)?.abs(),
-                kind: LibraryItemKind::Markdown,
+                kind: LibraryItemKind::from_db(&row.get::<_, String>(6)?),
             })
         })
         .map_err(db_error)?
@@ -734,7 +787,7 @@ fn search_notes(
         let pattern = format!("%{query}%");
         let mut fallback = db
             .prepare(
-                "SELECT vault_id, path, title, substr(content, 1, 180), tags
+                "SELECT vault_id, path, title, substr(content, 1, 180), tags, kind
                  FROM notes
                  WHERE title LIKE ?1 OR content LIKE ?1 OR tags LIKE ?1
                  ORDER BY modified_unix DESC
@@ -751,7 +804,7 @@ fn search_notes(
                     snippet: strip_frontmatter(&row.get::<_, String>(3)?).replace('\n', " "),
                     tags: serde_json::from_str(&tags_json).unwrap_or_default(),
                     score: 1.0,
-                    kind: LibraryItemKind::Markdown,
+                    kind: LibraryItemKind::from_db(&row.get::<_, String>(5)?),
                 })
             })
             .map_err(db_error)?
@@ -797,7 +850,11 @@ fn get_backlinks(
         .and_then(|value| value.to_str())
         .unwrap_or_default();
     let wiki_pattern = format!("[[{title}");
-    let file_pattern = format!("{title}.md");
+    let extension = Path::new(&path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("md");
+    let file_pattern = format!("{title}.{extension}");
     let db = state.db.lock().map_err(lock_error)?;
     let mut statement = db
         .prepare(
@@ -863,6 +920,13 @@ fn import_attachment(
     let mut file = fs::File::create(&target).map_err(io_error)?;
     file.write_all(&bytes).map_err(io_error)?;
     file.sync_all().map_err(io_error)?;
+    file_manager::register_generic_file(
+        &state,
+        &vault_id,
+        Path::new(&vault.path),
+        &target,
+        "attachment",
+    )?;
     Ok(format!("assets/{file_name}"))
 }
 
@@ -947,6 +1011,7 @@ fn init_database(path: &Path) -> AppResult<Connection> {
         CREATE TABLE IF NOT EXISTS notes (
           vault_id TEXT NOT NULL,
           path TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'markdown',
           title TEXT NOT NULL,
           tags TEXT NOT NULL DEFAULT '[]',
           content TEXT NOT NULL,
@@ -983,6 +1048,22 @@ fn init_database(path: &Path) -> AppResult<Connection> {
         ",
     )
     .map_err(db_error)?;
+    let has_note_kind = {
+        let mut statement = db.prepare("PRAGMA table_info(notes)").map_err(db_error)?;
+        let has_kind = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(db_error)?
+            .filter_map(Result::ok)
+            .any(|column| column == "kind");
+        has_kind
+    };
+    if !has_note_kind {
+        db.execute(
+            "ALTER TABLE notes ADD COLUMN kind TEXT NOT NULL DEFAULT 'markdown'",
+            [],
+        )
+        .map_err(db_error)?;
+    }
     word_files::init_library_files_schema(&db)?;
     Ok(db)
 }
@@ -993,7 +1074,7 @@ fn query_vaults(state: &AppState) -> AppResult<Vec<Vault>> {
         .prepare(
             "SELECT v.id, v.name, v.path, v.indexed_at,
                     (SELECT COUNT(*) FROM notes n WHERE n.vault_id = v.id)
-                    + (SELECT COUNT(*) FROM library_files f WHERE f.vault_id = v.id)
+                    + (SELECT COUNT(*) FROM library_files f WHERE f.vault_id = v.id AND f.role = 'library')
              FROM vaults v
              ORDER BY v.rowid",
         )
@@ -1021,7 +1102,7 @@ fn get_vault(state: &AppState, id: &str) -> AppResult<Vault> {
     db.query_row(
         "SELECT v.id, v.name, v.path, v.indexed_at,
                 (SELECT COUNT(*) FROM notes n WHERE n.vault_id = v.id)
-                + (SELECT COUNT(*) FROM library_files f WHERE f.vault_id = v.id)
+                + (SELECT COUNT(*) FROM library_files f WHERE f.vault_id = v.id AND f.role = 'library')
          FROM vaults v WHERE v.id = ?1",
         [id],
         |row| {
@@ -1045,14 +1126,14 @@ fn list_notes_inner(state: &AppState, vault_id: Option<&str>) -> AppResult<Vec<N
     let db = state.db.lock().map_err(lock_error)?;
     let (sql, parameter): (&str, Option<&str>) = if vault_id.is_some() {
         (
-            "SELECT vault_id, path, title, tags, modified_at, favorite, pinned, last_opened
+            "SELECT vault_id, path, title, tags, modified_at, favorite, pinned, last_opened, kind
              FROM notes WHERE vault_id = ?1
              ORDER BY pinned DESC, modified_unix DESC",
             vault_id,
         )
     } else {
         (
-            "SELECT vault_id, path, title, tags, modified_at, favorite, pinned, last_opened
+            "SELECT vault_id, path, title, tags, modified_at, favorite, pinned, last_opened, kind
              FROM notes
              ORDER BY pinned DESC, modified_unix DESC",
             None,
@@ -1070,6 +1151,7 @@ fn list_notes_inner(state: &AppState, vault_id: Option<&str>) -> AppResult<Vec<N
             is_favorite: row.get::<_, i64>(5)? != 0,
             is_pinned: row.get::<_, i64>(6)? != 0,
             last_opened: row.get(7)?,
+            kind: LibraryItemKind::from_db(&row.get::<_, String>(8)?),
         })
     };
     let notes = if let Some(id) = parameter {
@@ -1108,7 +1190,7 @@ fn list_library_items_inner(
                 vault_id: note.vault_id,
                 path: note.path,
                 title: note.title,
-                kind: LibraryItemKind::Markdown,
+                kind: note.kind,
                 tags: note.tags,
                 modified_at: note.modified_at,
                 is_favorite: note.is_favorite,
@@ -1118,6 +1200,16 @@ fn list_library_items_inner(
                 size_bytes,
                 sync_status: "unlinked".into(),
                 last_synced_at: None,
+                role: "library".into(),
+                mime_type: Some(
+                    if note.kind == LibraryItemKind::Txt {
+                        "text/plain"
+                    } else {
+                        "text/markdown"
+                    }
+                    .into(),
+                ),
+                original_name: None,
             }
         })
         .collect::<Vec<_>>();
@@ -1137,7 +1229,12 @@ fn read_note_inner(state: &AppState, vault_id: &str, path: &str) -> AppResult<No
     let absolute = safe_note_path(Path::new(&vault.path), path)?;
     let content = fs::read_to_string(&absolute).map_err(io_error)?;
     let metadata = fs::metadata(&absolute).map_err(io_error)?;
-    let tags = parse_frontmatter(&content).tags;
+    let kind = LibraryItemKind::from_path(&absolute).unwrap_or(LibraryItemKind::Markdown);
+    let tags = if kind == LibraryItemKind::Markdown {
+        parse_frontmatter(&content).tags
+    } else {
+        Vec::new()
+    };
     let flags: Option<(i64, i64, Option<String>)> = state
         .db
         .lock()
@@ -1160,8 +1257,9 @@ fn read_note_inner(state: &AppState, vault_id: &str, path: &str) -> AppResult<No
             is_favorite: favorite != 0,
             is_pinned: pinned != 0,
             last_opened,
+            kind,
         },
-        kind: LibraryItemKind::Markdown,
+        kind,
         revision: revision(&content),
         content,
     })
@@ -1174,8 +1272,23 @@ fn index_file(state: &AppState, vault_id: &str, root: &Path, path: &Path) -> App
     let metadata = fs::metadata(path).map_err(io_error)?;
     let modified_unix = modified_unix(&metadata);
     let modified_at = modified_iso(&metadata);
-    let tags = parse_frontmatter(&content).tags;
-    let searchable_content = strip_frontmatter(&content);
+    let kind = LibraryItemKind::from_path(path).unwrap_or(LibraryItemKind::Markdown);
+    if !kind.is_text() {
+        return Err(app_error(
+            "UNSUPPORTED_FILE_TYPE",
+            "只能索引 Markdown 或 TXT 文本",
+        ));
+    }
+    let tags = if kind == LibraryItemKind::Markdown {
+        parse_frontmatter(&content).tags
+    } else {
+        Vec::new()
+    };
+    let searchable_content = if kind == LibraryItemKind::Markdown {
+        strip_frontmatter(&content)
+    } else {
+        &content
+    };
     let tags_json = serde_json::to_string(&tags)
         .map_err(|error| app_error("SERIALIZE_FAILED", error.to_string()))?;
     let hash = revision(&content);
@@ -1183,16 +1296,27 @@ fn index_file(state: &AppState, vault_id: &str, root: &Path, path: &Path) -> App
     let db = state.db.lock().map_err(lock_error)?;
     db.execute(
         "INSERT INTO notes (
-           vault_id, path, title, tags, content, revision, modified_at, modified_unix, favorite, pinned, last_opened
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, 0, NULL)
+           vault_id, path, kind, title, tags, content, revision, modified_at, modified_unix, favorite, pinned, last_opened
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, NULL)
          ON CONFLICT(vault_id, path) DO UPDATE SET
+           kind = excluded.kind,
            title = excluded.title,
            tags = excluded.tags,
            content = excluded.content,
            revision = excluded.revision,
            modified_at = excluded.modified_at,
            modified_unix = excluded.modified_unix",
-        params![vault_id, relative, title, tags_json, content, hash, modified_at, modified_unix],
+        params![
+            vault_id,
+            relative,
+            kind.as_str(),
+            title,
+            tags_json,
+            content,
+            hash,
+            modified_at,
+            modified_unix
+        ],
     )
     .map_err(db_error)?;
     db.execute("DELETE FROM notes_fts WHERE note_key = ?1", [&key])
@@ -1210,6 +1334,8 @@ fn index_file(state: &AppState, vault_id: &str, root: &Path, path: &Path) -> App
         ],
     )
     .map_err(db_error)?;
+    drop(db);
+    file_manager::index_file_references(state, vault_id, root, path, &content)?;
     Ok(())
 }
 
@@ -1219,6 +1345,11 @@ fn delete_note_index(db: &Connection, vault_id: &str, path: &str) -> AppResult<(
         .map_err(db_error)?;
     db.execute(
         "DELETE FROM notes WHERE vault_id = ?1 AND path = ?2",
+        params![vault_id, path],
+    )
+    .map_err(db_error)?;
+    db.execute(
+        "DELETE FROM file_references WHERE vault_id = ?1 AND source_path = ?2",
         params![vault_id, path],
     )
     .map_err(db_error)?;
@@ -1271,20 +1402,24 @@ fn index_changed_vault_path(
         .and_then(|value| value.to_str())
         .unwrap_or_default();
     if !extension.eq_ignore_ascii_case("md")
+        && !extension.eq_ignore_ascii_case("txt")
         && !extension.eq_ignore_ascii_case("docx")
         && !extension.eq_ignore_ascii_case("doc")
+        && !extension.eq_ignore_ascii_case("pdf")
     {
         return Ok(());
     }
     if path.is_file() {
-        if extension.eq_ignore_ascii_case("md") {
+        if extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("txt") {
             index_file(state, vault_id, root, path)
-        } else {
+        } else if extension.eq_ignore_ascii_case("docx") || extension.eq_ignore_ascii_case("doc") {
             word_files::index_scanned_word_file(state, vault_id, root, path)
+        } else {
+            file_manager::register_scanned_library_file(state, vault_id, root, path)
         }
     } else {
         let relative = relative_string(root, path)?;
-        if extension.eq_ignore_ascii_case("md") {
+        if extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("txt") {
             let db = state.db.lock().map_err(lock_error)?;
             delete_note_index(&db, vault_id, &relative)
         } else {
@@ -1475,19 +1610,40 @@ fn safe_note_path(root: &Path, relative: &str) -> AppResult<PathBuf> {
     if !path
         .extension()
         .and_then(|value| value.to_str())
-        .is_some_and(|value| value.eq_ignore_ascii_case("md"))
+        .is_some_and(|value| value.eq_ignore_ascii_case("md") || value.eq_ignore_ascii_case("txt"))
     {
-        return Err(app_error("INVALID_PATH", "笔记必须是 Markdown 文件"));
+        return Err(app_error(
+            "INVALID_PATH",
+            "文本笔记必须是 Markdown 或 TXT 文件",
+        ));
     }
-    Ok(root.join(path))
+    let canonical_root =
+        fs::canonicalize(root).map_err(|_| app_error("VAULT_UNAVAILABLE", "资料库不可用"))?;
+    let candidate = canonical_root.join(path);
+    if candidate.exists() {
+        let canonical = fs::canonicalize(&candidate).map_err(io_error)?;
+        if !canonical.starts_with(&canonical_root) || !canonical.is_file() {
+            return Err(app_error("INVALID_PATH", "笔记路径不能离开资料库"));
+        }
+        Ok(canonical)
+    } else {
+        let parent = candidate
+            .parent()
+            .ok_or_else(|| app_error("INVALID_PATH", "笔记路径无效"))?;
+        let canonical_parent = fs::canonicalize(parent).map_err(io_error)?;
+        if !canonical_parent.starts_with(&canonical_root) {
+            return Err(app_error("INVALID_PATH", "笔记路径不能离开资料库"));
+        }
+        Ok(candidate)
+    }
 }
 
 fn sanitize_note_name(value: &str) -> AppResult<String> {
     let trimmed = value.trim();
-    let without_extension = trimmed
-        .get(trimmed.len().saturating_sub(3)..)
-        .filter(|suffix| suffix.eq_ignore_ascii_case(".md"))
-        .map(|_| &trimmed[..trimmed.len() - 3])
+    let without_extension = [".md", ".txt"]
+        .into_iter()
+        .find(|suffix| trimmed.to_ascii_lowercase().ends_with(suffix))
+        .map(|suffix| &trimmed[..trimmed.len() - suffix.len()])
         .unwrap_or(trimmed);
     let cleaned = without_extension.trim();
     if cleaned.is_empty()
@@ -1674,7 +1830,21 @@ pub fn run() {
             sync_library_file,
             relink_library_file,
             rename_library_file,
-            delete_library_file
+            delete_library_file,
+            inspect_dropped_paths,
+            import_text_documents,
+            import_library_files,
+            import_attachments_from_paths,
+            promote_attachment,
+            move_vault_file,
+            list_file_references,
+            read_pdf_preview,
+            open_vault_path,
+            list_vault_folders,
+            create_vault_folder,
+            rename_vault_folder,
+            delete_vault_folder,
+            reveal_vault_folder
         ])
         .run(tauri::generate_context!())
         .expect("failed to run NoteHarbor");
@@ -1687,12 +1857,28 @@ mod tests {
 
     #[test]
     fn rejects_paths_outside_a_vault() {
-        assert!(safe_note_path(Path::new("/tmp/vault"), "../secret.md").is_err());
-        assert!(safe_note_path(Path::new("/tmp/vault"), "notes/ok.md").is_ok());
+        let temporary = tempfile::tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        fs::create_dir_all(vault.join("notes")).unwrap();
+        assert!(safe_note_path(&vault, "../secret.md").is_err());
+        assert!(safe_note_path(&vault, "notes/ok.md").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_note_symlinks_that_escape_the_vault() {
+        use std::os::unix::fs::symlink;
+        let temporary = tempfile::tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let outside = temporary.path().join("outside.md");
+        fs::create_dir(&vault).unwrap();
+        fs::write(&outside, "secret").unwrap();
+        symlink(&outside, vault.join("linked.md")).unwrap();
+        assert!(safe_note_path(&vault, "linked.md").is_err());
     }
 
     #[test]
-    fn resolves_only_supported_library_files_for_reveal() {
+    fn resolves_vault_files_without_allowing_path_escape() {
         let temporary = tempfile::tempdir().unwrap();
         let note = temporary.path().join("笔记.md");
         fs::write(&note, "# 笔记").unwrap();
@@ -1703,7 +1889,10 @@ mod tests {
         assert!(resolve_library_item_path(temporary.path(), "../笔记.md").is_err());
         let text = temporary.path().join("说明.txt");
         fs::write(&text, "说明").unwrap();
-        assert!(resolve_library_item_path(temporary.path(), "说明.txt").is_err());
+        assert_eq!(
+            resolve_library_item_path(temporary.path(), "说明.txt").unwrap(),
+            fs::canonicalize(text).unwrap()
+        );
     }
 
     #[test]
@@ -1711,6 +1900,19 @@ mod tests {
         let parsed = parse_frontmatter("---\nid: abc\ntags: [项目, 灵感]\n---\n# 标题");
         assert_eq!(parsed.tags, vec!["项目", "灵感"]);
         assert!(parse_frontmatter("# 普通笔记").tags.is_empty());
+    }
+
+    #[test]
+    fn txt_is_a_first_class_text_note_without_frontmatter() {
+        let temporary = tempfile::tempdir().unwrap();
+        assert!(safe_note_path(temporary.path(), "说明.txt").is_ok());
+        assert_eq!(
+            LibraryItemKind::from_path(Path::new("说明.txt")),
+            Some(LibraryItemKind::Txt)
+        );
+        assert!(parse_frontmatter("# TXT 也按 Markdown 渲染")
+            .tags
+            .is_empty());
     }
 
     #[test]
@@ -1767,6 +1969,35 @@ mod tests {
         assert_eq!(notes[0].tags, vec!["灵感", "项目"]);
         let document = read_note_inner(&state, "vault", "想法.md").unwrap();
         assert!(document.content.contains("保持简单"));
+
+        fs::create_dir_all(vault_root.join("assets")).unwrap();
+        fs::write(vault_root.join("assets/参考.pdf"), b"%PDF-test").unwrap();
+        let text_path = vault_root.join("说明.txt");
+        fs::write(&text_path, "# TXT 标题\n\n[参考](assets/参考.pdf)").unwrap();
+        index_file(&state, "vault", &vault_root, &text_path).unwrap();
+        file_manager::reconcile_asset_records(&state, "vault", &vault_root).unwrap();
+
+        let text = read_note_inner(&state, "vault", "说明.txt").unwrap();
+        assert_eq!(text.kind, LibraryItemKind::Txt);
+        assert!(text.summary.tags.is_empty());
+        let references: i64 = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM file_references", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(references, 1);
+        let role: String = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT role FROM library_files WHERE path = 'assets/参考.pdf'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(role, "attachment");
     }
 
     #[test]

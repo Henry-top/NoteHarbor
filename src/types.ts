@@ -1,7 +1,8 @@
 export type EditorMode = "source" | "live" | "split";
 export type ThemeStyle = "modern" | "paper" | "glass";
 export type ColorMode = "system" | "light" | "dark";
-export type LibraryItemKind = "markdown" | "docx" | "doc";
+export type LibraryItemKind = "markdown" | "txt" | "docx" | "doc" | "pdf" | "file";
+export type FileRole = "attachment" | "library";
 export type WordSyncStatus = "synced" | "sourceMissing" | "outOfSync" | "unlinked" | "syncError";
 
 export interface Vault {
@@ -27,18 +28,21 @@ export interface LibraryItemSummary {
   sizeBytes?: number;
   syncStatus?: WordSyncStatus;
   lastSyncedAt?: string | null;
+  role?: FileRole;
+  mimeType?: string | null;
+  originalName?: string | null;
 }
 
 export type NoteSummary = LibraryItemSummary;
 
 export interface NoteDocument extends LibraryItemSummary {
-  kind: "markdown";
+  kind: "markdown" | "txt";
   content: string;
   revision: string;
 }
 
 export interface WordDocument extends LibraryItemSummary {
-  kind: "docx" | "doc";
+  kind: "docx" | "doc" | "pdf" | "file";
 }
 
 export type OpenItem = NoteDocument | WordDocument;
@@ -104,5 +108,42 @@ export interface OpenTab {
   vaultId: string;
   path: string;
   title: string;
+  kind: LibraryItemKind;
+  transient?: boolean;
+}
+
+export interface VaultFolder {
+  vaultId: string;
+  path: string;
+  name: string;
+  protected: boolean;
+}
+
+export interface DroppedPathInfo {
+  path: string;
+  name: string;
+  isDirectory: boolean;
+  kind?: LibraryItemKind | null;
+  sizeBytes: number;
+  accepted: boolean;
+  reason?: string | null;
+}
+
+export interface ImportBatchResult {
+  imported: LibraryItemSummary[];
+  insertedLinks: string[];
+  rejected: string[];
+}
+
+export interface FileReference {
+  vaultId: string;
+  sourcePath: string;
+  sourceTitle: string;
+  targetPath: string;
+  rawTarget: string;
+  linkType: "image" | "link";
+  resolved: boolean;
+  referenceCount: number;
+  role: FileRole;
   kind: LibraryItemKind;
 }

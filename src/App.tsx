@@ -18,18 +18,21 @@ import {
   X
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppearancePopover } from "./components/AppearancePopover";
 import { ConflictDialog } from "./components/ConflictDialog";
 import { DeleteItemDialog } from "./components/DeleteItemDialog";
 import { DocxPreview } from "./components/DocxPreview";
 import { EditorPane } from "./components/EditorPane";
+import { FolderContextMenu } from "./components/FolderContextMenu";
 import { HelpCenter } from "./components/HelpCenter";
 import { HoverTip } from "./components/HoverTip";
 import { InlineTitleEditor } from "./components/InlineTitleEditor";
 import { ItemContextMenu } from "./components/ItemContextMenu";
 import { MarkdownPreview } from "./components/MarkdownPreview";
 import { ModeSwitcher } from "./components/ModeSwitcher";
+import { PdfPreview } from "./components/PdfPreview";
 import { OnboardingTour } from "./components/OnboardingTour";
 import { RenameDialog } from "./components/RenameDialog";
 import { RightPanel } from "./components/RightPanel";
@@ -46,6 +49,7 @@ import type {
   ColorMode,
   EditorMode,
   FileConflict,
+  FileReference,
   HistoryEntry,
   IndexProgress,
   LibraryItemSummary,
@@ -54,7 +58,8 @@ import type {
   OpenTab,
   SearchHit,
   ThemeStyle,
-  Vault
+  Vault,
+  VaultFolder
 } from "./types";
 
 type SaveState = "saved" | "saving" | "error";
@@ -63,6 +68,9 @@ export default function App() {
   const initialAppearance = useRef(readAppearance());
   const [vaults, setVaults] = useState<Vault[]>([]);
   const [items, setItems] = useState<LibraryItemSummary[]>([]);
+  const [folders, setFolders] = useState<VaultFolder[]>([]);
+  const [fileReferences, setFileReferences] = useState<FileReference[]>([]);
+  const [transientItems, setTransientItems] = useState<LibraryItemSummary[]>([]);
   const [current, setCurrent] = useState<OpenItem | null>(null);
   const [draft, setDraft] = useState("");
   const [dirty, setDirty] = useState(false);
@@ -90,9 +98,12 @@ export default function App() {
   const [previewRevision, setPreviewRevision] = useState(0);
   const [vaultMenu, setVaultMenu] = useState<{ vault: Vault; x: number; y: number } | null>(null);
   const [itemMenu, setItemMenu] = useState<{ item: LibraryItemSummary; x: number; y: number } | null>(null);
+  const [folderMenu, setFolderMenu] = useState<{ folder: VaultFolder; x: number; y: number } | null>(null);
+  const [dropOverlay, setDropOverlay] = useState<{ label: string; active: boolean } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<LibraryItemSummary | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState("");
+  const [deleteReferenceCount, setDeleteReferenceCount] = useState(0);
   const [renameTarget, setRenameTarget] = useState<OpenItem | null>(null);
   const [renameBusy, setRenameBusy] = useState(false);
   const [renameError, setRenameError] = useState("");
@@ -120,9 +131,9 @@ export default function App() {
   }, [current]);
 
   useEffect(() => {
-    if (!current || current.kind === "markdown") return;
+    if (!current || isTextKind(current.kind)) return;
     const latest = items.find((item) => item.vaultId === current.vaultId && item.path === current.path);
-    if (!latest || latest.kind === "markdown") return;
+    if (!latest || isTextKind(latest.kind)) return;
     const previewChanged = latest.modifiedAt !== current.modifiedAt || latest.lastSyncedAt !== current.lastSyncedAt;
     const metadataChanged = previewChanged
       || latest.syncStatus !== current.syncStatus
@@ -138,8 +149,14 @@ export default function App() {
 
   const refreshItems = useCallback(async () => {
     try {
-      const next = await api.listLibraryItems();
+      const [next, folderGroups] = await Promise.all([
+        api.listLibraryItems(),
+        api.listVaults().then((allVaults) => Promise.all(
+          allVaults.filter((vault) => vault.available).map((vault) => api.listVaultFolders(vault.id))
+        ))
+      ]);
       setItems(next);
+      setFolders(folderGroups.flat());
       setVaults((items) =>
         items.map((vault) => ({
           ...vault,
@@ -171,7 +188,13 @@ export default function App() {
         const scanned = await Promise.all(
           loadedVaults.filter((vault) => vault.available).map((vault) => api.scanVault(vault.id))
         );
-        if (!cancelled) setItems(scanned.flat());
+        const loadedFolders = await Promise.all(
+          loadedVaults.filter((vault) => vault.available).map((vault) => api.listVaultFolders(vault.id))
+        );
+        if (!cancelled) {
+          setItems(scanned.flat());
+          setFolders(loadedFolders.flat());
+        }
       } catch (error) {
         showError(error, setToast);
       } finally {
@@ -197,6 +220,82 @@ export default function App() {
       unlistenChanged?.();
     };
   }, [refreshItems]);
+
+  useEffect(() => {
+    if (!runningInTauri) return;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWebview().onDragDropEvent(async (event) => {
+      const payload = event.payload;
+      if (payload.type === "leave") {
+        setDropOverlay(null);
+        return;
+      }
+      const position = "position" in payload ? payload.position : undefined;
+      const point = position
+        ? {
+            x: position.x / (window.devicePixelRatio || 1),
+            y: position.y / (window.devicePixelRatio || 1)
+          }
+        : undefined;
+      const element = point ? document.elementFromPoint(point.x, point.y) as HTMLElement | null : null;
+      const target = element?.closest<HTMLElement>("[data-drop-vault-id], [data-drop-editor]");
+      const editorTarget = Boolean(target?.hasAttribute("data-drop-editor") && currentRef.current && isTextKind(currentRef.current.kind));
+      const vaultId = target?.dataset.dropVaultId || currentRef.current?.vaultId || activeVaultId;
+      const directory = target?.dataset.dropDirectory || "";
+      const vault = vaults.find((item) => item.id === vaultId);
+      const label = editorTarget
+        ? `作为“${currentRef.current?.title}”的附件`
+        : `导入到 ${vault?.name || "当前资料库"}${directory ? ` / ${directory}` : ""}`;
+      setDropOverlay({ label, active: payload.type === "drop" });
+      if (payload.type !== "drop" || !vaultId) return;
+      try {
+        const paths = payload.paths;
+        const inspected = await api.inspectDroppedPaths(paths);
+        const directories = inspected.filter((item) => item.isDirectory);
+        const files = inspected.filter((item) => !item.isDirectory);
+        if (directories.length && files.length) throw new Error("文件和文件夹请分开拖入");
+        if (directories.length) {
+          if (directories.length !== 1) throw new Error("一次只能添加一个资料库文件夹");
+          if (!window.confirm(`将“${directories[0].name}”登记为资料库？文件不会被复制或移动。`)) return;
+          const added = await api.registerVault(directories[0].path);
+          setVaults((existing) => [...existing.filter((item) => item.id !== added.id), added]);
+          setActiveVaultId(added.id);
+          await api.scanVault(added.id);
+          await refreshItems();
+          return;
+        }
+        const accepted = inspected.filter((item) => item.accepted);
+        if (!accepted.length) throw new Error(inspected[0]?.reason || "没有可导入的文件");
+        if (editorTarget && currentRef.current && isTextKind(currentRef.current.kind)) {
+          const result = await api.importAttachmentsFromPaths(
+            currentRef.current.vaultId,
+            currentRef.current.path,
+            accepted.map((item) => item.path)
+          );
+          if (result.insertedLinks.length) {
+            const next = `${draftRef.current}${draftRef.current.endsWith("\n") ? "" : "\n"}${result.insertedLinks.join("\n")}\n`;
+            setDraft(next);
+            draftRef.current = next;
+            setDirty(true);
+          }
+        } else {
+          const textPaths = accepted.filter((item) => item.kind === "markdown" || item.kind === "txt").map((item) => item.path);
+          const wordPaths = accepted.filter((item) => item.kind === "docx" || item.kind === "doc").map((item) => item.path);
+          const otherPaths = accepted.filter((item) => !["markdown", "txt", "docx", "doc"].includes(item.kind || "")).map((item) => item.path);
+          if (textPaths.length) await api.importTextDocuments(vaultId, directory, textPaths);
+          if (wordPaths.length) await api.importWordDocuments(vaultId, wordPaths);
+          if (otherPaths.length) await api.importLibraryFiles(vaultId, directory, otherPaths);
+        }
+        await refreshItems();
+        setToast(`已导入 ${accepted.length} 个文件`);
+      } catch (error) {
+        showError(error, setToast);
+      } finally {
+        window.setTimeout(() => setDropOverlay(null), 450);
+      }
+    }).then((dispose) => { unlisten = dispose; });
+    return () => unlisten?.();
+  }, [activeVaultId, refreshItems, vaults]);
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -270,6 +369,7 @@ export default function App() {
         setHelpOpen(false);
         setVaultMenu(null);
         setItemMenu(null);
+        setFolderMenu(null);
       }
     };
     window.addEventListener("keydown", handler);
@@ -278,37 +378,46 @@ export default function App() {
 
   const openItem = useCallback(async (summary: LibraryItemSummary) => {
     try {
-      if (dirty && currentRef.current?.kind === "markdown") {
+      if (dirty && currentRef.current && isTextDocument(currentRef.current)) {
         await saveNowRef.current(currentRef.current, draftRef.current, true);
       }
-      const document: OpenItem = summary.kind === "markdown"
+      const document: OpenItem = isTextKind(summary.kind)
         ? await api.readNote(summary.vaultId, summary.path)
         : { ...summary, kind: summary.kind };
       setCurrent(document);
-      setDraft(document.kind === "markdown" ? document.content : "");
+      setDraft(isTextDocument(document) ? document.content : "");
       setDirty(false);
       setSaveState("saved");
       setActiveVaultId(document.vaultId);
-      if (document.kind === "markdown") {
+      if (isTextDocument(document)) {
         const storedMode = localStorage.getItem(`noteharbor:mode:${document.vaultId}:${document.path}`) as EditorMode | null;
         setMode(storedMode || "live");
       }
       setTabs((existing) => {
-        const tab = { vaultId: document.vaultId, path: document.path, title: document.title, kind: document.kind };
+        const tab = {
+          vaultId: document.vaultId,
+          path: document.path,
+          title: document.title,
+          kind: document.kind,
+          transient: document.role === "attachment"
+        };
         return existing.some((item) => item.vaultId === tab.vaultId && item.path === tab.path)
           ? existing
           : [...existing, tab];
       });
-      if (document.kind === "markdown") {
-        const [nextBacklinks, nextHistory] = await Promise.all([
+      if (isTextDocument(document)) {
+        const [nextBacklinks, nextHistory, nextReferences] = await Promise.all([
           api.backlinks(document.vaultId, document.path),
-          api.listHistory(document.vaultId, document.path)
+          api.listHistory(document.vaultId, document.path),
+          api.listFileReferences(document.vaultId, document.path)
         ]);
         setBacklinks(nextBacklinks);
         setHistory(nextHistory);
+        setFileReferences(nextReferences);
       } else {
         setBacklinks([]);
         setHistory([]);
+        setFileReferences([]);
       }
       void refreshItems();
     } catch (error) {
@@ -345,6 +454,9 @@ export default function App() {
           if (draftRef.current === content) setDirty(false);
           setSaveState("saved");
           void refreshItems();
+          void api.listFileReferences(result.document.vaultId, result.document.path)
+            .then(setFileReferences)
+            .catch(() => undefined);
           return result.document;
         }
         return null;
@@ -357,7 +469,7 @@ export default function App() {
   saveNowRef.current = saveNow;
 
   useEffect(() => {
-    if (!current || current.kind !== "markdown" || !dirty || conflict) return;
+    if (!current || !isTextDocument(current) || !dirty || conflict) return;
     const timer = window.setTimeout(() => {
       autoSaveTimerRef.current = null;
       if (!renameActiveRef.current) void saveNow(current, draft);
@@ -370,7 +482,7 @@ export default function App() {
   }, [current, draft, dirty, conflict, saveNow]);
 
   useEffect(() => {
-    if (!current || current.kind !== "markdown" || dirty) return;
+    if (!current || !isTextDocument(current) || dirty) return;
     const timer = window.setTimeout(() => {
       void api.createSnapshot(current.vaultId, current.path, current.content).then(() =>
         api.listHistory(current.vaultId, current.path).then(setHistory)
@@ -411,9 +523,9 @@ export default function App() {
     }
   }
 
-  async function createNote(vaultId: string, kind: "regular" | "daily" = "regular") {
+  async function createNote(vaultId: string, kind: "regular" | "daily" = "regular", targetDirectory?: string) {
     try {
-      const document = await api.createNote(vaultId, kind);
+      const document = await api.createNote(vaultId, kind, targetDirectory);
       await refreshItems();
       await openItem(document);
     } catch (error) {
@@ -442,10 +554,113 @@ export default function App() {
     }
   }
 
-  async function openCurrentInDefaultApp() {
-    if (!current || current.kind === "markdown") return;
+  async function importIntoFolder(vaultId: string, targetDirectory: string) {
     try {
-      await api.openLibraryFile(current.vaultId, current.path);
+      if (!runningInTauri) throw new Error("请在桌面应用中导入文件");
+      const selected = await open({
+        directory: false,
+        multiple: true,
+        title: "选择要导入的文件"
+      });
+      if (!selected) return;
+      const paths = Array.isArray(selected) ? selected : [selected];
+      const inspected = await api.inspectDroppedPaths(paths);
+      const accepted = inspected.filter((item) => item.accepted && !item.isDirectory);
+      const text = accepted.filter((item) => isTextKind(item.kind || "file")).map((item) => item.path);
+      const word = accepted.filter((item) => isWordKind(item.kind || "file")).map((item) => item.path);
+      const other = accepted.filter((item) => !isTextKind(item.kind || "file") && !isWordKind(item.kind || "file")).map((item) => item.path);
+      if (text.length) await api.importTextDocuments(vaultId, targetDirectory, text);
+      if (word.length) await api.importWordDocuments(vaultId, word);
+      if (other.length) await api.importLibraryFiles(vaultId, targetDirectory, other);
+      await refreshItems();
+      setToast(`已导入 ${accepted.length} 个文件`);
+    } catch (error) {
+      showError(error, setToast);
+    }
+  }
+
+  async function createFolder(folder: VaultFolder) {
+    const name = window.prompt(`在“${folder.name}”中新建子文件夹：`);
+    if (!name) return;
+    try {
+      await api.createVaultFolder(folder.vaultId, folder.path, name);
+      await refreshItems();
+      setToast(`已新建文件夹“${name.trim()}”`);
+    } catch (error) {
+      showError(error, setToast);
+    }
+  }
+
+  async function renameFolder(folder: VaultFolder) {
+    const name = window.prompt("输入新的文件夹名称：", folder.name);
+    if (!name || name.trim() === folder.name) return;
+    try {
+      const active = currentRef.current;
+      if (active && isTextDocument(active) && dirty) {
+        const saved = await saveNow(active, draftRef.current, true);
+        if (!saved) throw new Error("保存当前内容失败，未执行文件夹重命名");
+      }
+      await api.renameVaultFolder(folder.vaultId, folder.path, name);
+      const parent = folder.path.includes("/") ? folder.path.slice(0, folder.path.lastIndexOf("/")) : "";
+      const newBase = parent ? `${parent}/${name.trim()}` : name.trim();
+      const remap = (path: string) => path === folder.path
+        ? newBase
+        : path.startsWith(`${folder.path}/`)
+          ? `${newBase}/${path.slice(folder.path.length + 1)}`
+          : path;
+      setTabs((existing) => existing.map((tab) =>
+        tab.vaultId === folder.vaultId
+          ? { ...tab, path: remap(tab.path) }
+          : tab
+      ));
+      if (active?.vaultId === folder.vaultId && active.path.startsWith(`${folder.path}/`)) {
+        const nextPath = remap(active.path);
+        const reopened = isTextDocument(active)
+          ? await api.readNote(active.vaultId, nextPath)
+          : { ...active, path: nextPath };
+        setCurrent(reopened as OpenItem);
+        currentRef.current = reopened as OpenItem;
+        if (isTextDocument(reopened as OpenItem)) {
+          setDraft((reopened as NoteDocument).content);
+          draftRef.current = (reopened as NoteDocument).content;
+        }
+      }
+      await refreshItems();
+      setToast("文件夹已重命名；相关内容已重新索引");
+    } catch (error) {
+      showError(error, setToast);
+    }
+  }
+
+  async function deleteFolder(folder: VaultFolder) {
+    const childCount = items.filter((item) =>
+      item.vaultId === folder.vaultId && item.path.startsWith(`${folder.path}/`)
+    ).length;
+    try {
+      const references = await api.listFileReferences(folder.vaultId);
+      const affectedReferences = references.filter((reference) =>
+        reference.targetPath.startsWith(`${folder.path}/`)
+      ).length;
+      if (!window.confirm(
+        `将“${folder.name}”及其中 ${childCount} 个项目移到系统废纸篓？这会影响 ${affectedReferences} 条文件引用。`
+      )) return;
+      await api.deleteVaultFolder(folder.vaultId, folder.path);
+      await api.scanVault(folder.vaultId);
+      await refreshItems();
+      setToast("文件夹已移到系统废纸篓");
+    } catch (error) {
+      showError(error, setToast);
+    }
+  }
+
+  async function openCurrentInDefaultApp() {
+    if (!current || isTextKind(current.kind)) return;
+    try {
+      if (current.kind === "docx" || current.kind === "doc") {
+        await api.openLibraryFile(current.vaultId, current.path);
+      } else {
+        await api.openVaultPath(current.vaultId, current.path);
+      }
       await refreshItems();
     } catch (error) {
       showError(error, setToast);
@@ -453,7 +668,7 @@ export default function App() {
   }
 
   async function syncCurrentWord() {
-    if (!current || current.kind === "markdown") return;
+    if (!current || !isWordKind(current.kind)) return;
     try {
       const synced = await api.syncLibraryFile(current.vaultId, current.path);
       setCurrent(synced as OpenItem);
@@ -468,7 +683,7 @@ export default function App() {
   }
 
   async function relinkCurrentWord() {
-    if (!current || current.kind === "markdown") return;
+    if (!current || !isWordKind(current.kind)) return;
     try {
       if (!runningInTauri) throw new Error("请在桌面应用中重新关联源文件");
       const selected = await open({
@@ -493,14 +708,19 @@ export default function App() {
   }
 
   async function closeTab(tab: OpenTab) {
-    if (current?.kind === "markdown" && current.vaultId === tab.vaultId && current.path === tab.path && dirty) {
+    if (current && isTextDocument(current) && current.vaultId === tab.vaultId && current.path === tab.path && dirty) {
       await saveNow(current, draft, true);
     }
     setTabs((items) => items.filter((item) => item.vaultId !== tab.vaultId || item.path !== tab.path));
+    if (tab.transient) {
+      setTransientItems((existing) => existing.filter((item) =>
+        item.vaultId !== tab.vaultId || item.path !== tab.path
+      ));
+    }
     if (current?.vaultId === tab.vaultId && current.path === tab.path) {
       const remaining = tabs.filter((item) => item.vaultId !== tab.vaultId || item.path !== tab.path);
       const next = remaining.at(-1);
-      const nextItem = next && items.find((item) => item.vaultId === next.vaultId && item.path === next.path);
+      const nextItem = next && [...items, ...transientItems].find((item) => item.vaultId === next.vaultId && item.path === next.path);
       if (nextItem) await openItem(nextItem);
       else {
         setCurrent(null);
@@ -523,7 +743,7 @@ export default function App() {
       const active = currentRef.current;
       const target = active?.vaultId === item.vaultId && active.path === item.path
         ? active
-        : item.kind === "markdown"
+        : isTextKind(item.kind)
           ? await api.readNote(item.vaultId, item.path)
           : item as OpenItem;
       setRenameTarget(target);
@@ -550,9 +770,9 @@ export default function App() {
     setRenameError("");
     try {
       const renamed = await enqueueFileOperation(async () => {
-        if (target.kind === "markdown") {
+        if (isTextKind(target.kind)) {
           const active = currentRef.current;
-          if (active?.kind === "markdown"
+          if (active && isTextDocument(active)
             && active.vaultId === target.vaultId
             && active.path === target.path) {
             const diskDocument = await api.readNote(target.vaultId, target.path);
@@ -584,7 +804,7 @@ export default function App() {
         setCurrent(renamed as OpenItem);
         currentRef.current = renamed as OpenItem;
       }
-      if (targetIsCurrent && renamed.kind === "markdown") {
+      if (targetIsCurrent && isTextDocument(renamed as OpenItem)) {
         const document = renamed as NoteDocument;
         setDraft(document.content);
         draftRef.current = document.content;
@@ -617,10 +837,17 @@ export default function App() {
     }
   }
 
-  function requestDelete(item: LibraryItemSummary) {
+  async function requestDelete(item: LibraryItemSummary) {
     setDeleteTarget(item);
     setDeleteError("");
     setDeleteBusy(false);
+    setDeleteReferenceCount(0);
+    try {
+      const references = await api.listFileReferences(item.vaultId, undefined, item.path);
+      setDeleteReferenceCount(new Set(references.map((reference) => reference.sourcePath)).size);
+    } catch {
+      // The delete flow still works if an old index has not built file references yet.
+    }
   }
 
   async function confirmDeleteItem() {
@@ -631,11 +858,11 @@ export default function App() {
     try {
       const active = currentRef.current;
       const targetIsCurrent = active?.vaultId === target.vaultId && active.path === target.path;
-      if (targetIsCurrent && active?.kind === "markdown" && draftRef.current !== active.content) {
+      if (targetIsCurrent && active && isTextDocument(active) && draftRef.current !== active.content) {
         const saved = await saveNow(active, draftRef.current, true);
         if (!saved) throw new Error("保存当前内容失败，未执行删除");
       }
-      if (target.kind === "markdown") await api.deleteNote(target.vaultId, target.path);
+      if (isTextKind(target.kind)) await api.deleteNote(target.vaultId, target.path);
       else await api.deleteLibraryFile(target.vaultId, target.path);
 
       const remainingTabs = tabs.filter((tab) =>
@@ -685,11 +912,11 @@ export default function App() {
   }
 
   async function duplicateNote(item: LibraryItemSummary) {
-    if (item.kind !== "markdown") return;
+    if (!isTextKind(item.kind)) return;
     try {
       const active = currentRef.current;
       let document: NoteDocument;
-      if (active?.kind === "markdown" && active.vaultId === item.vaultId && active.path === item.path) {
+      if (active && isTextDocument(active) && active.vaultId === item.vaultId && active.path === item.path) {
         document = active;
         if (draftRef.current !== active.content) {
           const saved = await saveNow(active, draftRef.current, true);
@@ -762,16 +989,17 @@ export default function App() {
   }
 
   async function openWordItem(item: LibraryItemSummary) {
-    if (item.kind === "markdown") return;
+    if (isTextKind(item.kind)) return;
     try {
-      await api.openLibraryFile(item.vaultId, item.path);
+      if (isWordKind(item.kind)) await api.openLibraryFile(item.vaultId, item.path);
+      else await api.openVaultPath(item.vaultId, item.path);
     } catch (error) {
       showError(error, setToast);
     }
   }
 
   async function syncWordItem(item: LibraryItemSummary) {
-    if (item.kind === "markdown") return;
+    if (!isWordKind(item.kind)) return;
     try {
       const synced = await api.syncLibraryFile(item.vaultId, item.path);
       setItems((existing) => existing.map((candidate) =>
@@ -791,7 +1019,7 @@ export default function App() {
   }
 
   async function relinkWordItem(item: LibraryItemSummary) {
-    if (item.kind === "markdown") return;
+    if (!isWordKind(item.kind)) return;
     try {
       if (!runningInTauri) throw new Error("请在桌面应用中重新关联源文件");
       const selected = await open({
@@ -826,19 +1054,19 @@ export default function App() {
   }
 
   async function openWikiLink(target: string) {
-    if (!current || current.kind !== "markdown") return;
-    const normalized = target.replace(/\.md$/i, "");
+    if (!current || !isTextDocument(current)) return;
+    const normalized = target.replace(/\.(md|txt)$/i, "");
     const note = items.find((item) =>
-      item.kind === "markdown" &&
+      isTextKind(item.kind) &&
       item.vaultId === current.vaultId &&
-      (item.title === normalized || item.path.replace(/\.md$/i, "") === normalized)
+      (item.title === normalized || item.path.replace(/\.(md|txt)$/i, "") === normalized)
     );
     if (note) await openItem(note);
     else setToast(`本资料库中没有找到“${target}”`);
   }
 
   async function importAttachment(file: File) {
-    if (!current || current.kind !== "markdown") throw new Error("请先打开一篇 Markdown 笔记");
+    if (!current || !isTextDocument(current)) throw new Error("请先打开一篇 Markdown 或 TXT 笔记");
     const bytes = [...new Uint8Array(await file.arrayBuffer())];
     const stored = await api.importAttachment(current.vaultId, file.name || "image.png", bytes);
     const depth = Math.max(0, current.path.split("/").length - 1);
@@ -855,7 +1083,7 @@ export default function App() {
 
   function changeMode(next: EditorMode) {
     setMode(next);
-    if (current?.kind === "markdown") localStorage.setItem(`noteharbor:mode:${current.vaultId}:${current.path}`, next);
+    if (current && isTextDocument(current)) localStorage.setItem(`noteharbor:mode:${current.vaultId}:${current.path}`, next);
   }
 
   const currentSummary = current
@@ -864,7 +1092,7 @@ export default function App() {
   const statusText = saveState === "saving" ? t("saving") : saveState === "error" ? t("saveFailed") : t("saved");
   const activeVault = vaults.find((vault) => vault.id === activeVaultId);
   const totalLines = draft ? draft.split("\n").length : 0;
-  const showRightPanel = Boolean(current?.kind === "markdown" && rightPanelOpen);
+  const showRightPanel = Boolean(current && isTextKind(current.kind) && rightPanelOpen);
   const primaryShortcut = navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl+";
 
   return (
@@ -873,6 +1101,7 @@ export default function App() {
         <Sidebar
           vaults={vaults}
           items={items}
+          folders={folders}
           activeVaultId={activeVaultId}
           activePath={current?.path}
           indexProgress={indexProgress}
@@ -880,7 +1109,7 @@ export default function App() {
           onActivateVault={setActiveVaultId}
           onAddVault={() => void addVault()}
           onImportWord={(vaultId) => void importWord(vaultId)}
-          onNewNote={(vaultId, kind) => void createNote(vaultId, kind)}
+          onNewNote={(vaultId, kind, targetDirectory) => void createNote(vaultId, kind, targetDirectory)}
           onSearch={() => setSearchOpen(true)}
           onHide={() => setSidebarOpen(false)}
           onVaultMenu={(vault, anchor) => {
@@ -889,11 +1118,18 @@ export default function App() {
           }}
           onItemContextMenu={(item, position) => {
             const menuWidth = 218;
-            const menuHeight = item.kind === "markdown" ? 330 : 390;
+            const menuHeight = isTextKind(item.kind) ? 330 : 390;
             setItemMenu({
               item,
               x: Math.max(8, Math.min(position.x, window.innerWidth - menuWidth - 8)),
               y: Math.max(8, Math.min(position.y, window.innerHeight - menuHeight - 8))
+            });
+          }}
+          onFolderContextMenu={(folder, position) => {
+            setFolderMenu({
+              folder,
+              x: Math.max(8, Math.min(position.x, window.innerWidth - 230)),
+              y: Math.max(8, Math.min(position.y, window.innerHeight - 360))
             });
           }}
         />
@@ -937,7 +1173,7 @@ export default function App() {
                 <Palette size={17} />
               </button>
             </HoverTip>
-            {current?.kind === "markdown" && (
+            {current && isTextKind(current.kind) && (
               <HoverTip label="笔记信息" detail="查看标签、大纲、反向链接和历史">
                 <button className={`icon-button ${rightPanelOpen ? "active" : ""}`} onClick={() => setRightPanelOpen((value) => !value)}>
                   <PanelRight size={17} />
@@ -961,7 +1197,7 @@ export default function App() {
             const active = current?.vaultId === tab.vaultId && current.path === tab.path;
             return (
               <button className={`tab ${active ? "active" : ""}`} key={`${tab.vaultId}:${tab.path}`} onClick={() => {
-                const item = items.find((candidate) => candidate.vaultId === tab.vaultId && candidate.path === tab.path);
+                const item = [...items, ...transientItems].find((candidate) => candidate.vaultId === tab.vaultId && candidate.path === tab.path);
                 if (item) void openItem(item);
               }}>
                 <span>{tab.title}</span>
@@ -992,14 +1228,14 @@ export default function App() {
                   error={renameError}
                   onRename={(name) => renameCurrent(name, current, true)}
                 />
-                {current.kind === "markdown" ? (
+                {isTextDocument(current) ? (
                   <span className={`save-status ${saveState}`}>{statusText}</span>
-                ) : (
+                ) : isWordKind(current.kind) ? (
                   <WordSyncBadge item={current} />
-                )}
+                ) : null}
               </div>
               <div className="document-actions">
-                {current.kind === "markdown" ? (
+                {isTextDocument(current) ? (
                   <>
                     <ModeSwitcher mode={mode} onChange={changeMode} />
                     <span className="toolbar-divider" />
@@ -1018,14 +1254,14 @@ export default function App() {
                 <DocumentMenu
                   onRename={openRenameDialog}
                   onDelete={() => current && requestDelete(current)}
-                  onSync={current.kind === "markdown" ? undefined : () => void syncCurrentWord()}
-                  onRelink={current.kind === "markdown" ? undefined : () => void relinkCurrentWord()}
+                  onSync={isWordKind(current.kind) ? () => void syncCurrentWord() : undefined}
+                  onRelink={isWordKind(current.kind) ? () => void relinkCurrentWord() : undefined}
                 />
               </div>
             </div>
 
-            <div className={`document-stage ${current.kind === "markdown" ? `mode-${mode}` : "mode-document"}`}>
-              {current.kind === "markdown" ? (
+            <div className={`document-stage ${isTextDocument(current) ? `mode-${mode}` : "mode-document"}`}>
+              {isTextDocument(current) ? (
                 <>
                   <EditorPane
                     value={draft}
@@ -1058,6 +1294,8 @@ export default function App() {
                   revision={previewRevision}
                   onLoaded={refreshItems}
                 />
+              ) : current.kind === "pdf" ? (
+                <PdfPreview item={current} onOpenExternal={() => void openCurrentInDefaultApp()} />
               ) : (
                 <LegacyDocPlaceholder onOpen={() => void openCurrentInDefaultApp()} />
               )}
@@ -1066,11 +1304,11 @@ export default function App() {
             <footer className="statusbar">
               <span>{current.path}</span>
               <div>
-                {current.kind === "markdown" ? (
+                {isTextDocument(current) ? (
                   <>
                     <span>{wordCount(draft)} {t("words")}</span>
                     <span>{totalLines} {t("lines")}</span>
-                    <span>Markdown</span>
+                    <span>{current.kind === "txt" ? "TXT · Markdown 兼容渲染" : "Markdown"}</span>
                   </>
                 ) : (
                   <>
@@ -1084,7 +1322,7 @@ export default function App() {
         )}
       </main>
 
-      {rightPanelOpen && current?.kind === "markdown" && (
+      {rightPanelOpen && current && isTextDocument(current) && (
         <RightPanel
           document={{
             ...current,
@@ -1094,6 +1332,7 @@ export default function App() {
           }}
           backlinks={backlinks}
           history={history}
+          fileReferences={fileReferences}
           onClose={() => setRightPanelOpen(false)}
           onOpenBacklink={(backlink) => {
             const item = items.find((candidate) => candidate.vaultId === backlink.vaultId && candidate.path === backlink.path);
@@ -1107,9 +1346,80 @@ export default function App() {
             void refreshItems();
           }).catch((error) => showError(error, setToast))}
           onUpdateTags={(tags) => {
+            if (current.kind === "txt") return;
             const next = updateTags(draft, tags);
             setDraft(next);
             setDirty(true);
+          }}
+          onOpenAttachment={(reference) => {
+            const item = items.find((candidate) =>
+              candidate.vaultId === reference.vaultId && candidate.path === reference.targetPath
+            );
+            if (item) void openItem(item);
+            else if (reference.kind === "pdf") {
+              const temporary: LibraryItemSummary = {
+                vaultId: reference.vaultId,
+                path: reference.targetPath,
+                title: reference.targetPath.split("/").at(-1)?.replace(/\.pdf$/i, "") || "PDF",
+                kind: "pdf",
+                tags: [],
+                modifiedAt: new Date().toISOString(),
+                isFavorite: false,
+                isPinned: false,
+                role: "attachment",
+                sizeBytes: 0
+              };
+              setTransientItems((existing) => [
+                ...existing.filter((candidate) => candidate.vaultId !== temporary.vaultId || candidate.path !== temporary.path),
+                temporary
+              ]);
+              void openItem(temporary);
+            } else {
+              void api.openVaultPath(reference.vaultId, reference.targetPath)
+                .catch((error) => showError(error, setToast));
+            }
+          }}
+          onRevealAttachment={(reference) => void api.revealLibraryItem(reference.vaultId, reference.targetPath)
+            .catch((error) => showError(error, setToast))}
+          onPromoteAttachment={(reference) => void api.promoteAttachment(reference.vaultId, reference.targetPath)
+            .then(async () => {
+              await refreshItems();
+              setFileReferences(await api.listFileReferences(reference.vaultId, current.path));
+              setToast("已转为资料库文件，原有链接保持不变");
+            })
+            .catch((error) => showError(error, setToast))}
+          onMoveAttachment={(reference) => {
+            const target = window.prompt("移动到资料库中的哪个文件夹？留空表示根目录。", "");
+            if (target === null) return;
+            void api.moveVaultFile(reference.vaultId, reference.targetPath, target.trim())
+              .then(async () => {
+                await refreshItems();
+                setFileReferences(await api.listFileReferences(reference.vaultId, current.path));
+                setToast("文件已移动，所有引用已自动更新");
+              })
+              .catch((error) => showError(error, setToast));
+          }}
+          onCopyAttachmentPath={(reference) => void copyItemText(reference.targetPath, "已复制附件相对路径")}
+          onRemoveReference={(reference) => {
+            const next = removeReferenceMarkup(draft, reference.rawTarget);
+            if (next === draft) {
+              setToast("未能自动定位这条引用，请在正文中删除");
+              return;
+            }
+            setDraft(next);
+            draftRef.current = next;
+            setDirty(true);
+            setToast("已从当前笔记移除引用，实际文件仍保留");
+          }}
+          onDeleteAttachment={(reference) => {
+            if (!window.confirm(`这个文件被 ${reference.referenceCount} 篇笔记引用。确定删除实际文件吗？现有链接会失效。`)) return;
+            void api.deleteLibraryFile(reference.vaultId, reference.targetPath)
+              .then(async () => {
+                await refreshItems();
+                setFileReferences(await api.listFileReferences(reference.vaultId, current.path));
+                setToast("实际文件已移到系统废纸篓");
+              })
+              .catch((error) => showError(error, setToast));
           }}
         />
       )}
@@ -1161,7 +1471,7 @@ export default function App() {
         conflict={conflict}
         onClose={() => setConflict(null)}
         onLoadDisk={() => {
-          if (!conflict || current?.kind !== "markdown") return;
+          if (!conflict || !current || !isTextDocument(current)) return;
           setDraft(conflict.diskContent);
           setCurrent({ ...current, content: conflict.diskContent, revision: conflict.actualRevision });
           setDirty(false);
@@ -1169,12 +1479,12 @@ export default function App() {
           setSaveState("saved");
         }}
         onKeepMine={() => {
-          if (current?.kind !== "markdown") return;
+          if (!current || !isTextDocument(current)) return;
           setConflict(null);
           void saveNow(current, draft, false, true);
         }}
         onSaveCopy={() => {
-          if (current?.kind !== "markdown") return;
+          if (!current || !isTextDocument(current)) return;
           void api.saveCopy(current.vaultId, current.path, draft).then((copy) => {
             setConflict(null);
             void refreshItems();
@@ -1188,6 +1498,7 @@ export default function App() {
           <div className="menu-scrim" onClick={() => setVaultMenu(null)} />
           <div className="context-menu" style={{ left: vaultMenu.x - 178, top: vaultMenu.y + 4 }}>
             <button onClick={() => void createNote(vaultMenu.vault.id)}><PlusMenuIcon />{t("newNote")}</button>
+            <button onClick={() => { setVaultMenu(null); void importIntoFolder(vaultMenu.vault.id, ""); }}><Import size={15} />导入文件</button>
             <button onClick={() => { setVaultMenu(null); void importWord(vaultMenu.vault.id); }}><Import size={15} />{t("importWord")}</button>
             <button className="danger" onClick={() => void removeVault(vaultMenu.vault)}><Trash2 size={15} />{t("removeVault")}</button>
           </div>
@@ -1203,27 +1514,44 @@ export default function App() {
           onClose={() => setItemMenu(null)}
           actions={{
             onRename: () => void openRenameDialogForItem(itemMenu.item),
-            onDuplicate: itemMenu.item.kind === "markdown"
+            onDuplicate: isTextKind(itemMenu.item.kind)
               ? () => void duplicateNote(itemMenu.item)
               : undefined,
-            onCopyWikiLink: itemMenu.item.kind === "markdown"
+            onCopyWikiLink: isTextKind(itemMenu.item.kind)
               ? () => void copyItemText(`[[${itemMenu.item.title}]]`, "已复制笔记链接")
               : undefined,
             onCopyPath: () => void copyItemText(itemMenu.item.path, "已复制相对路径"),
             onTogglePinned: () => void toggleItemFlag(itemMenu.item, "pinned"),
             onToggleFavorite: () => void toggleItemFlag(itemMenu.item, "favorite"),
             onReveal: () => void revealItem(itemMenu.item),
-            onOpenExternal: itemMenu.item.kind === "markdown"
+            onOpenExternal: isTextKind(itemMenu.item.kind)
               ? undefined
               : () => void openWordItem(itemMenu.item),
-            onSync: itemMenu.item.kind !== "markdown" && itemMenu.item.sourcePath
+            onSync: isWordKind(itemMenu.item.kind) && itemMenu.item.sourcePath
               ? () => void syncWordItem(itemMenu.item)
               : undefined,
-            onRelink: itemMenu.item.kind === "markdown"
-              ? undefined
-              : () => void relinkWordItem(itemMenu.item),
+            onRelink: isWordKind(itemMenu.item.kind)
+              ? () => void relinkWordItem(itemMenu.item)
+              : undefined,
             onDelete: () => requestDelete(itemMenu.item)
           }}
+        />
+      )}
+
+      {folderMenu && (
+        <FolderContextMenu
+          folder={folderMenu.folder}
+          x={folderMenu.x}
+          y={folderMenu.y}
+          onClose={() => setFolderMenu(null)}
+          onNewNote={() => void createNote(folderMenu.folder.vaultId, "regular", folderMenu.folder.path)}
+          onNewFolder={() => void createFolder(folderMenu.folder)}
+          onImport={() => void importIntoFolder(folderMenu.folder.vaultId, folderMenu.folder.path)}
+          onRename={() => void renameFolder(folderMenu.folder)}
+          onCopyPath={() => void copyItemText(folderMenu.folder.path, "已复制文件夹相对路径")}
+          onReveal={() => void api.revealVaultFolder(folderMenu.folder.vaultId, folderMenu.folder.path)
+            .catch((error) => showError(error, setToast))}
+          onDelete={() => void deleteFolder(folderMenu.folder)}
         />
       )}
 
@@ -1232,15 +1560,24 @@ export default function App() {
         actionLabel={platformFileLabels(navigator.platform).trash}
         busy={deleteBusy}
         error={deleteError}
+        referenceCount={deleteReferenceCount}
         onCancel={() => {
           if (deleteBusy) return;
           setDeleteTarget(null);
           setDeleteError("");
+          setDeleteReferenceCount(0);
         }}
         onConfirm={() => void confirmDeleteItem()}
       />
 
       {toast && <div className="toast" onAnimationEnd={() => setToast("")}>{toast}</div>}
+      {dropOverlay && (
+        <div className={`drop-overlay ${dropOverlay.active ? "dropping" : ""}`}>
+          <Import size={28} />
+          <strong>{dropOverlay.label}</strong>
+          <span>松开即可导入，原文件不会被移动</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -1316,7 +1653,8 @@ function LegacyDocPlaceholder({ onOpen }: { onOpen: () => void }) {
 }
 
 function WordSyncBadge({ item }: { item: LibraryItemSummary }) {
-  if (item.kind === "markdown" || item.syncStatus === "synced") return <span className="word-sync-badge synced">已同步</span>;
+  if (!isWordKind(item.kind)) return null;
+  if (item.syncStatus === "synced") return <span className="word-sync-badge synced">已同步</span>;
   const label = item.syncStatus === "sourceMissing"
     ? t("sourceMissing")
     : item.syncStatus === "outOfSync"
@@ -1325,6 +1663,23 @@ function WordSyncBadge({ item }: { item: LibraryItemSummary }) {
         ? t("unlinkedSource")
         : "同步状态异常";
   return <span className={`word-sync-badge ${item.syncStatus || "unknown"}`}>{label}</span>;
+}
+
+function isTextKind(kind: LibraryItemSummary["kind"]) {
+  return kind === "markdown" || kind === "txt";
+}
+
+function isWordKind(kind: LibraryItemSummary["kind"]) {
+  return kind === "docx" || kind === "doc";
+}
+
+function isTextDocument(item: OpenItem): item is NoteDocument {
+  return isTextKind(item.kind);
+}
+
+function removeReferenceMarkup(content: string, rawTarget: string) {
+  const escaped = rawTarget.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return content.replace(new RegExp(`!?\\[([^\\]]*)\\]\\(${escaped}\\)`), "$1");
 }
 
 function formatBytes(bytes: number) {
