@@ -504,14 +504,19 @@ fn rename_note(
         .parent()
         .ok_or_else(|| app_error("INVALID_PATH", "笔记路径无效"))?;
     let new_absolute = parent.join(format!("{cleaned}.md"));
-    if new_absolute.exists() {
-        return Err(app_error("NOTE_ALREADY_EXISTS", "同名笔记已经存在"));
-    }
     let old_title = old_absolute
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_string();
+    if cleaned == old_title {
+        return read_note_inner(&state, &vault_id, &path);
+    }
+    let case_only_rename = new_absolute.exists()
+        && fs::canonicalize(&old_absolute).ok() == fs::canonicalize(&new_absolute).ok();
+    if new_absolute.exists() && !case_only_rename {
+        return Err(app_error("NOTE_ALREADY_EXISTS", "同名笔记已经存在"));
+    }
     let new_title = cleaned.clone();
     let old_relative = relative_string(&root, &old_absolute)?;
     let new_relative = relative_string(&root, &new_absolute)?;
@@ -548,7 +553,16 @@ fn rename_note(
         let relative = relative_string(&root, file)?;
         create_snapshot_inner(&state, &vault_id, &relative, original)?;
     }
-    fs::rename(&old_absolute, &new_absolute).map_err(io_error)?;
+    if case_only_rename {
+        let temporary = parent.join(format!(".noteharbor-rename-{}.tmp", Uuid::new_v4()));
+        fs::rename(&old_absolute, &temporary).map_err(io_error)?;
+        if let Err(error) = fs::rename(&temporary, &new_absolute) {
+            let _ = fs::rename(&temporary, &old_absolute);
+            return Err(io_error(error));
+        }
+    } else {
+        fs::rename(&old_absolute, &new_absolute).map_err(io_error)?;
+    }
 
     let mut written: Vec<(PathBuf, String)> = Vec::new();
     for (file, original, updated) in &changes {
@@ -1418,7 +1432,13 @@ fn safe_note_path(root: &Path, relative: &str) -> AppResult<PathBuf> {
 }
 
 fn sanitize_note_name(value: &str) -> AppResult<String> {
-    let cleaned = value.trim().trim_end_matches(".md").trim();
+    let trimmed = value.trim();
+    let without_extension = trimmed
+        .get(trimmed.len().saturating_sub(3)..)
+        .filter(|suffix| suffix.eq_ignore_ascii_case(".md"))
+        .map(|_| &trimmed[..trimmed.len() - 3])
+        .unwrap_or(trimmed);
+    let cleaned = without_extension.trim();
     if cleaned.is_empty()
         || cleaned == "."
         || cleaned == ".."
@@ -1588,6 +1608,8 @@ mod tests {
     #[test]
     fn sanitizes_note_names() {
         assert_eq!(sanitize_note_name("新笔记.md").unwrap(), "新笔记");
+        assert_eq!(sanitize_note_name(" 新笔记.MD ").unwrap(), "新笔记");
+        assert_eq!(sanitize_note_name("说明md").unwrap(), "说明md");
         assert!(sanitize_note_name("../坏名称").is_err());
     }
 

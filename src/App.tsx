@@ -24,6 +24,7 @@ import { DocxPreview } from "./components/DocxPreview";
 import { EditorPane } from "./components/EditorPane";
 import { MarkdownPreview } from "./components/MarkdownPreview";
 import { ModeSwitcher } from "./components/ModeSwitcher";
+import { RenameDialog } from "./components/RenameDialog";
 import { RightPanel } from "./components/RightPanel";
 import { SearchPalette } from "./components/SearchPalette";
 import { Sidebar } from "./components/Sidebar";
@@ -77,15 +78,21 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [previewRevision, setPreviewRevision] = useState(0);
   const [vaultMenu, setVaultMenu] = useState<{ vault: Vault; x: number; y: number } | null>(null);
+  const [renameTarget, setRenameTarget] = useState<OpenItem | null>(null);
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState("");
   const previewRef = useRef<HTMLDivElement>(null);
   const draftRef = useRef(draft);
   const currentRef = useRef(current);
+  const operationQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const autoSaveTimerRef = useRef<number | null>(null);
+  const renameActiveRef = useRef(false);
   const saveNowRef = useRef<(
     document: NoteDocument,
     content: string,
     quiet?: boolean,
     force?: boolean
-  ) => Promise<void>>(async () => undefined);
+  ) => Promise<NoteDocument | null>>(async () => null);
 
   useEffect(() => {
     draftRef.current = draft;
@@ -125,6 +132,15 @@ export default function App() {
     } catch (error) {
       showError(error, setToast);
     }
+  }, []);
+
+  const enqueueFileOperation = useCallback(<T,>(operation: () => Promise<T>) => {
+    const task = operationQueueRef.current.then(operation, operation);
+    operationQueueRef.current = task.then(
+      () => undefined,
+      () => undefined
+    );
+    return task;
   }, []);
 
   useEffect(() => {
@@ -260,46 +276,57 @@ export default function App() {
     }
   }, [dirty, refreshItems]);
 
-  const saveNow = useCallback(async (
+  const saveNow = useCallback((
     document: NoteDocument,
     content: string,
     quiet = false,
     force = false
-  ) => {
-    try {
-      if (!quiet) setSaveState("saving");
-      const result = await api.saveNote(
-        document.vaultId,
-        document.path,
-        content,
-        document.revision,
-        force
-      );
-      if (result.status === "conflict" && result.conflict) {
-        setConflict(result.conflict);
+  ): Promise<NoteDocument | null> => enqueueFileOperation(async () => {
+      try {
+        if (!quiet) setSaveState("saving");
+        const result = await api.saveNote(
+          document.vaultId,
+          document.path,
+          content,
+          document.revision,
+          force
+        );
+        if (result.status === "conflict" && result.conflict) {
+          setConflict(result.conflict);
+          setSaveState("error");
+          return null;
+        }
+        if (result.document) {
+          setCurrent((value) => {
+            if (!value || value.vaultId !== document.vaultId || value.path !== document.path) return value;
+            currentRef.current = result.document!;
+            return result.document!;
+          });
+          if (draftRef.current === content) setDirty(false);
+          setSaveState("saved");
+          void refreshItems();
+          return result.document;
+        }
+        return null;
+      } catch (error) {
         setSaveState("error");
-        return;
+        showError(error, setToast);
+        return null;
       }
-      if (result.document) {
-        setCurrent((value) => {
-          if (!value || value.vaultId !== document.vaultId || value.path !== document.path) return value;
-          return result.document!;
-        });
-        if (draftRef.current === content) setDirty(false);
-        setSaveState("saved");
-        void refreshItems();
-      }
-    } catch (error) {
-      setSaveState("error");
-      showError(error, setToast);
-    }
-  }, [refreshItems]);
+    }), [enqueueFileOperation, refreshItems]);
   saveNowRef.current = saveNow;
 
   useEffect(() => {
     if (!current || current.kind !== "markdown" || !dirty || conflict) return;
-    const timer = window.setTimeout(() => void saveNow(current, draft), 500);
-    return () => window.clearTimeout(timer);
+    const timer = window.setTimeout(() => {
+      autoSaveTimerRef.current = null;
+      if (!renameActiveRef.current) void saveNow(current, draft);
+    }, 500);
+    autoSaveTimerRef.current = timer;
+    return () => {
+      window.clearTimeout(timer);
+      if (autoSaveTimerRef.current === timer) autoSaveTimerRef.current = null;
+    };
   }, [current, draft, dirty, conflict, saveNow]);
 
   useEffect(() => {
@@ -444,24 +471,83 @@ export default function App() {
     }
   }
 
-  async function renameCurrent() {
+  function openRenameDialog() {
     if (!current) return;
-    const next = window.prompt("新的文件名称", current.title);
-    if (!next || next.trim() === current.title) return;
+    setRenameTarget(current);
+    setRenameError("");
+    setRenameBusy(false);
+  }
+
+  async function renameCurrent(nextName: string) {
+    const target = renameTarget;
+    if (!target) return;
+    renameActiveRef.current = true;
+    if (autoSaveTimerRef.current !== null) {
+      window.clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    setRenameBusy(true);
+    setRenameError("");
     try {
-      const renamed = current.kind === "markdown"
-        ? await api.renameNote(current.vaultId, current.path, next.trim())
-        : await api.renameLibraryFile(current.vaultId, current.path, next.trim());
+      const renamed = await enqueueFileOperation(async () => {
+        if (target.kind === "markdown") {
+          const active = currentRef.current;
+          if (active?.kind === "markdown"
+            && active.vaultId === target.vaultId
+            && active.path === target.path) {
+            const diskDocument = await api.readNote(target.vaultId, target.path);
+            const latestDraft = draftRef.current;
+            if (latestDraft !== diskDocument.content) {
+              const saved = await api.saveNote(
+                diskDocument.vaultId,
+                diskDocument.path,
+                latestDraft,
+                diskDocument.revision
+              );
+              if (saved.status === "conflict" && saved.conflict) {
+                throw {
+                  code: "FILE_CONFLICT",
+                  message: "文件已在其他软件中修改，请先处理内容冲突再重命名"
+                };
+              }
+              if (!saved.document) {
+                throw { code: "SAVE_FAILED", message: "保存当前内容失败，未执行重命名" };
+              }
+            }
+          }
+          return api.renameNote(target.vaultId, target.path, nextName);
+        }
+        return api.renameLibraryFile(target.vaultId, target.path, nextName);
+      });
+
       setCurrent(renamed as OpenItem);
-      if (renamed.kind === "markdown") setDraft((renamed as NoteDocument).content);
+      currentRef.current = renamed as OpenItem;
+      if (renamed.kind === "markdown") {
+        const document = renamed as NoteDocument;
+        setDraft(document.content);
+        draftRef.current = document.content;
+        setDirty(false);
+        setSaveState("saved");
+        const [nextBacklinks, nextHistory] = await Promise.all([
+          api.backlinks(document.vaultId, document.path),
+          api.listHistory(document.vaultId, document.path)
+        ]);
+        setBacklinks(nextBacklinks);
+        setHistory(nextHistory);
+      }
       setTabs((items) => items.map((tab) =>
-        tab.vaultId === current.vaultId && tab.path === current.path
+        tab.vaultId === target.vaultId && tab.path === target.path
           ? { vaultId: renamed.vaultId, path: renamed.path, title: renamed.title, kind: renamed.kind }
           : tab
       ));
+      setRenameTarget(null);
+      setToast(`已重命名为“${renamed.title}”`);
       await refreshItems();
     } catch (error) {
-      showError(error, setToast);
+      setRenameError(errorMessage(error));
+    } finally {
+      renameActiveRef.current = false;
+      setRenameBusy(false);
     }
   }
 
@@ -654,7 +740,7 @@ export default function App() {
                 <button className={`icon-button ${current.isPinned ? "active" : ""}`} onClick={() => void toggleFlag("pinned")} title={t("pinned")}><Pin size={16} /></button>
                 <button className={`icon-button ${current.isFavorite ? "active" : ""}`} onClick={() => void toggleFlag("favorite")} title={t("favorites")}><Heart size={16} /></button>
                 <DocumentMenu
-                  onRename={() => void renameCurrent()}
+                  onRename={openRenameDialog}
                   onDelete={() => void deleteCurrent()}
                   onSync={current.kind === "markdown" ? undefined : () => void syncCurrentWord()}
                   onRelink={current.kind === "markdown" ? undefined : () => void relinkCurrentWord()}
@@ -761,6 +847,20 @@ export default function App() {
         onQueryChange={setSearchQuery}
         onSelect={selectSearchHit}
         onClose={() => setSearchOpen(false)}
+      />
+
+      <RenameDialog
+        open={Boolean(renameTarget)}
+        currentName={renameTarget?.title || ""}
+        kind={renameTarget?.kind || "markdown"}
+        busy={renameBusy}
+        error={renameError}
+        onCancel={() => {
+          if (renameBusy) return;
+          setRenameTarget(null);
+          setRenameError("");
+        }}
+        onSubmit={(name) => void renameCurrent(name)}
       />
 
       <ConflictDialog
@@ -896,16 +996,20 @@ function PlusMenuIcon() {
 }
 
 function showError(error: unknown, setter: (value: string) => void) {
+  setter(errorMessage(error));
+}
+
+function errorMessage(error: unknown) {
   if (typeof error === "object" && error && "message" in error) {
-    setter(String((error as { message: unknown }).message));
-  } else if (typeof error === "string") {
+    return String((error as { message: unknown }).message);
+  }
+  if (typeof error === "string") {
     try {
       const parsed = JSON.parse(error) as { message?: string };
-      setter(parsed.message || error);
+      return parsed.message || error;
     } catch {
-      setter(error);
+      return error;
     }
-  } else {
-    setter("发生了一个未预期的问题");
   }
+  return "发生了一个未预期的问题";
 }
