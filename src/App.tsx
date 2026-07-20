@@ -20,8 +20,10 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppearancePopover } from "./components/AppearancePopover";
 import { ConflictDialog } from "./components/ConflictDialog";
+import { DeleteItemDialog } from "./components/DeleteItemDialog";
 import { DocxPreview } from "./components/DocxPreview";
 import { EditorPane } from "./components/EditorPane";
+import { ItemContextMenu } from "./components/ItemContextMenu";
 import { MarkdownPreview } from "./components/MarkdownPreview";
 import { ModeSwitcher } from "./components/ModeSwitcher";
 import { RenameDialog } from "./components/RenameDialog";
@@ -32,6 +34,7 @@ import { t } from "./i18n";
 import { api, runningInTauri } from "./lib/api";
 import { applyAppearance, readAppearance, storeAppearance } from "./lib/appearance";
 import { updateTags, wordCount } from "./lib/markdown";
+import { platformFileLabels } from "./lib/platform";
 import type {
   Backlink,
   ColorMode,
@@ -78,6 +81,10 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [previewRevision, setPreviewRevision] = useState(0);
   const [vaultMenu, setVaultMenu] = useState<{ vault: Vault; x: number; y: number } | null>(null);
+  const [itemMenu, setItemMenu] = useState<{ item: LibraryItemSummary; x: number; y: number } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<LibraryItemSummary | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const [renameTarget, setRenameTarget] = useState<OpenItem | null>(null);
   const [renameBusy, setRenameBusy] = useState(false);
   const [renameError, setRenameError] = useState("");
@@ -230,6 +237,7 @@ export default function App() {
         setSearchOpen(false);
         setAppearanceOpen(false);
         setVaultMenu(null);
+        setItemMenu(null);
       }
     };
     window.addEventListener("keydown", handler);
@@ -478,13 +486,33 @@ export default function App() {
     setRenameBusy(false);
   }
 
+  async function openRenameDialogForItem(item: LibraryItemSummary) {
+    try {
+      const active = currentRef.current;
+      const target = active?.vaultId === item.vaultId && active.path === item.path
+        ? active
+        : item.kind === "markdown"
+          ? await api.readNote(item.vaultId, item.path)
+          : item as OpenItem;
+      setRenameTarget(target);
+      setRenameError("");
+      setRenameBusy(false);
+    } catch (error) {
+      showError(error, setToast);
+    }
+  }
+
   async function renameCurrent(nextName: string) {
     const target = renameTarget;
     if (!target) return;
-    renameActiveRef.current = true;
-    if (autoSaveTimerRef.current !== null) {
-      window.clearTimeout(autoSaveTimerRef.current);
-      autoSaveTimerRef.current = null;
+    const active = currentRef.current;
+    const targetIsCurrent = active?.vaultId === target.vaultId && active.path === target.path;
+    if (targetIsCurrent) {
+      renameActiveRef.current = true;
+      if (autoSaveTimerRef.current !== null) {
+        window.clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
     }
     setRenameBusy(true);
     setRenameError("");
@@ -520,9 +548,11 @@ export default function App() {
         return api.renameLibraryFile(target.vaultId, target.path, nextName);
       });
 
-      setCurrent(renamed as OpenItem);
-      currentRef.current = renamed as OpenItem;
-      if (renamed.kind === "markdown") {
+      if (targetIsCurrent) {
+        setCurrent(renamed as OpenItem);
+        currentRef.current = renamed as OpenItem;
+      }
+      if (targetIsCurrent && renamed.kind === "markdown") {
         const document = renamed as NoteDocument;
         setDraft(document.content);
         draftRef.current = document.content;
@@ -546,21 +576,57 @@ export default function App() {
     } catch (error) {
       setRenameError(errorMessage(error));
     } finally {
-      renameActiveRef.current = false;
+      if (targetIsCurrent) renameActiveRef.current = false;
       setRenameBusy(false);
     }
   }
 
-  async function deleteCurrent() {
-    if (!current || !window.confirm(`将“${current.title}”移到废纸篓？`)) return;
+  function requestDelete(item: LibraryItemSummary) {
+    setDeleteTarget(item);
+    setDeleteError("");
+    setDeleteBusy(false);
+  }
+
+  async function confirmDeleteItem() {
+    const target = deleteTarget;
+    if (!target) return;
+    setDeleteBusy(true);
+    setDeleteError("");
     try {
-      if (current.kind === "markdown") await api.deleteNote(current.vaultId, current.path);
-      else await api.deleteLibraryFile(current.vaultId, current.path);
-      const tab = { vaultId: current.vaultId, path: current.path, title: current.title, kind: current.kind };
-      await closeTab(tab);
+      const active = currentRef.current;
+      const targetIsCurrent = active?.vaultId === target.vaultId && active.path === target.path;
+      if (targetIsCurrent && active?.kind === "markdown" && draftRef.current !== active.content) {
+        const saved = await saveNow(active, draftRef.current, true);
+        if (!saved) throw new Error("保存当前内容失败，未执行删除");
+      }
+      if (target.kind === "markdown") await api.deleteNote(target.vaultId, target.path);
+      else await api.deleteLibraryFile(target.vaultId, target.path);
+
+      const remainingTabs = tabs.filter((tab) =>
+        tab.vaultId !== target.vaultId || tab.path !== target.path
+      );
+      setTabs(remainingTabs);
+      if (targetIsCurrent) {
+        setCurrent(null);
+        currentRef.current = null;
+        setDraft("");
+        draftRef.current = "";
+        setDirty(false);
+        setBacklinks([]);
+        setHistory([]);
+        const next = remainingTabs.at(-1);
+        const nextItem = next && items.find((item) =>
+          item.vaultId === next.vaultId && item.path === next.path
+        );
+        if (nextItem) await openItem(nextItem);
+      }
+      setDeleteTarget(null);
+      setToast(`已${platformFileLabels(navigator.platform).trash}“${target.title}”`);
       await refreshItems();
     } catch (error) {
-      showError(error, setToast);
+      setDeleteError(errorMessage(error));
+    } finally {
+      setDeleteBusy(false);
     }
   }
 
@@ -582,12 +648,145 @@ export default function App() {
     }
   }
 
+  async function duplicateNote(item: LibraryItemSummary) {
+    if (item.kind !== "markdown") return;
+    try {
+      const active = currentRef.current;
+      let document: NoteDocument;
+      if (active?.kind === "markdown" && active.vaultId === item.vaultId && active.path === item.path) {
+        document = active;
+        if (draftRef.current !== active.content) {
+          const saved = await saveNow(active, draftRef.current, true);
+          if (!saved) throw new Error("保存当前内容失败，未复制笔记");
+          document = saved;
+        }
+      } else {
+        document = await api.readNote(item.vaultId, item.path);
+      }
+      const copy = await api.saveCopy(document.vaultId, document.path, document.content);
+      await refreshItems();
+      await openItem(copy);
+      setToast(`已创建“${copy.title}”`);
+    } catch (error) {
+      showError(error, setToast);
+    }
+  }
+
+  async function copyItemText(text: string, successMessage: string) {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        try {
+          textarea.select();
+          if (!document.execCommand("copy")) throw new Error("系统拒绝了复制操作");
+        } finally {
+          textarea.remove();
+        }
+      }
+      setToast(successMessage);
+    } catch (error) {
+      showError(error, setToast);
+    }
+  }
+
+  async function toggleItemFlag(item: LibraryItemSummary, flag: "favorite" | "pinned") {
+    try {
+      const field = flag === "favorite" ? "isFavorite" : "isPinned";
+      const value = !item[field];
+      await api.setNoteFlag(item.vaultId, item.path, flag, value);
+      setItems((existing) => existing.map((candidate) =>
+        candidate.vaultId === item.vaultId && candidate.path === item.path
+          ? { ...candidate, [field]: value }
+          : candidate
+      ));
+      setCurrent((active) => {
+        if (!active || active.vaultId !== item.vaultId || active.path !== item.path) return active;
+        const updated = { ...active, [field]: value };
+        currentRef.current = updated;
+        return updated;
+      });
+      setToast(value ? `已${flag === "favorite" ? "收藏" : "置顶"}` : `已取消${flag === "favorite" ? "收藏" : "置顶"}`);
+    } catch (error) {
+      showError(error, setToast);
+    }
+  }
+
+  async function revealItem(item: LibraryItemSummary) {
+    try {
+      await api.revealLibraryItem(item.vaultId, item.path);
+    } catch (error) {
+      showError(error, setToast);
+    }
+  }
+
+  async function openWordItem(item: LibraryItemSummary) {
+    if (item.kind === "markdown") return;
+    try {
+      await api.openLibraryFile(item.vaultId, item.path);
+    } catch (error) {
+      showError(error, setToast);
+    }
+  }
+
+  async function syncWordItem(item: LibraryItemSummary) {
+    if (item.kind === "markdown") return;
+    try {
+      const synced = await api.syncLibraryFile(item.vaultId, item.path);
+      setItems((existing) => existing.map((candidate) =>
+        candidate.vaultId === synced.vaultId && candidate.path === synced.path ? synced : candidate
+      ));
+      setCurrent((active) => {
+        if (!active || active.vaultId !== synced.vaultId || active.path !== synced.path) return active;
+        const updated = synced as OpenItem;
+        currentRef.current = updated;
+        return updated;
+      });
+      setPreviewRevision((value) => value + 1);
+      setToast("已从源文件重新同步");
+    } catch (error) {
+      showError(error, setToast);
+    }
+  }
+
+  async function relinkWordItem(item: LibraryItemSummary) {
+    if (item.kind === "markdown") return;
+    try {
+      if (!runningInTauri) throw new Error("请在桌面应用中重新关联源文件");
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        title: "选择新的 Word 源文件",
+        filters: [{ name: "Word 文档", extensions: [item.kind] }]
+      });
+      if (typeof selected !== "string") return;
+      const confirmed = window.confirm("重新关联后，新源文件会覆盖资料库中的当前副本。是否继续？");
+      if (!confirmed) return;
+      const relinked = await api.relinkLibraryFile(item.vaultId, item.path, selected);
+      setItems((existing) => existing.map((candidate) =>
+        candidate.vaultId === relinked.vaultId && candidate.path === relinked.path ? relinked : candidate
+      ));
+      setCurrent((active) => {
+        if (!active || active.vaultId !== relinked.vaultId || active.path !== relinked.path) return active;
+        const updated = relinked as OpenItem;
+        currentRef.current = updated;
+        return updated;
+      });
+      setPreviewRevision((value) => value + 1);
+      setToast("已重新关联并同步源文件");
+    } catch (error) {
+      showError(error, setToast);
+    }
+  }
+
   async function toggleFlag(flag: "favorite" | "pinned") {
     if (!current) return;
-    const value = flag === "favorite" ? !current.isFavorite : !current.isPinned;
-    await api.setNoteFlag(current.vaultId, current.path, flag, value);
-    setCurrent({ ...current, [flag === "favorite" ? "isFavorite" : "isPinned"]: value });
-    await refreshItems();
+    await toggleItemFlag(current, flag);
   }
 
   async function openWikiLink(target: string) {
@@ -650,6 +849,15 @@ export default function App() {
           onVaultMenu={(vault, anchor) => {
             const rect = anchor.getBoundingClientRect();
             setVaultMenu({ vault, x: rect.right, y: rect.bottom });
+          }}
+          onItemContextMenu={(item, position) => {
+            const menuWidth = 218;
+            const menuHeight = item.kind === "markdown" ? 330 : 390;
+            setItemMenu({
+              item,
+              x: Math.max(8, Math.min(position.x, window.innerWidth - menuWidth - 8)),
+              y: Math.max(8, Math.min(position.y, window.innerHeight - menuHeight - 8))
+            });
           }}
         />
       )}
@@ -741,7 +949,7 @@ export default function App() {
                 <button className={`icon-button ${current.isFavorite ? "active" : ""}`} onClick={() => void toggleFlag("favorite")} title={t("favorites")}><Heart size={16} /></button>
                 <DocumentMenu
                   onRename={openRenameDialog}
-                  onDelete={() => void deleteCurrent()}
+                  onDelete={() => current && requestDelete(current)}
                   onSync={current.kind === "markdown" ? undefined : () => void syncCurrentWord()}
                   onRelink={current.kind === "markdown" ? undefined : () => void relinkCurrentWord()}
                 />
@@ -899,6 +1107,52 @@ export default function App() {
           </div>
         </>
       )}
+
+      {itemMenu && (
+        <ItemContextMenu
+          item={itemMenu.item}
+          x={itemMenu.x}
+          y={itemMenu.y}
+          labels={platformFileLabels(navigator.platform)}
+          onClose={() => setItemMenu(null)}
+          actions={{
+            onRename: () => void openRenameDialogForItem(itemMenu.item),
+            onDuplicate: itemMenu.item.kind === "markdown"
+              ? () => void duplicateNote(itemMenu.item)
+              : undefined,
+            onCopyWikiLink: itemMenu.item.kind === "markdown"
+              ? () => void copyItemText(`[[${itemMenu.item.title}]]`, "已复制双向链接")
+              : undefined,
+            onCopyPath: () => void copyItemText(itemMenu.item.path, "已复制相对路径"),
+            onTogglePinned: () => void toggleItemFlag(itemMenu.item, "pinned"),
+            onToggleFavorite: () => void toggleItemFlag(itemMenu.item, "favorite"),
+            onReveal: () => void revealItem(itemMenu.item),
+            onOpenExternal: itemMenu.item.kind === "markdown"
+              ? undefined
+              : () => void openWordItem(itemMenu.item),
+            onSync: itemMenu.item.kind !== "markdown" && itemMenu.item.sourcePath
+              ? () => void syncWordItem(itemMenu.item)
+              : undefined,
+            onRelink: itemMenu.item.kind === "markdown"
+              ? undefined
+              : () => void relinkWordItem(itemMenu.item),
+            onDelete: () => requestDelete(itemMenu.item)
+          }}
+        />
+      )}
+
+      <DeleteItemDialog
+        item={deleteTarget}
+        actionLabel={platformFileLabels(navigator.platform).trash}
+        busy={deleteBusy}
+        error={deleteError}
+        onCancel={() => {
+          if (deleteBusy) return;
+          setDeleteTarget(null);
+          setDeleteError("");
+        }}
+        onConfirm={() => void confirmDeleteItem()}
+      />
 
       {toast && <div className="toast" onAnimationEnd={() => setToast("")}>{toast}</div>}
     </div>

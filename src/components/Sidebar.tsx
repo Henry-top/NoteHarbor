@@ -33,6 +33,7 @@ interface SidebarProps {
   onSearch: () => void;
   onHide: () => void;
   onVaultMenu: (vault: Vault, anchor: HTMLElement) => void;
+  onItemContextMenu: (item: LibraryItemSummary, position: { x: number; y: number }) => void;
 }
 
 type TreeNode = {
@@ -55,7 +56,8 @@ export function Sidebar({
   onNewNote,
   onSearch,
   onHide,
-  onVaultMenu
+  onVaultMenu,
+  onItemContextMenu
 }: SidebarProps) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [section, setSection] = useState<"all" | "recent" | "favorites" | "pinned">("all");
@@ -161,6 +163,7 @@ export function Sidebar({
                   toggle={toggle}
                   activePath={activeVaultId === vault.id ? activePath : undefined}
                   onSelect={onSelectItem}
+                  onContextMenu={onItemContextMenu}
                 />
               )}
               {!isCollapsed && vaultNotes.length === 0 && (
@@ -212,7 +215,8 @@ function Tree({
   collapsed,
   toggle,
   activePath,
-  onSelect
+  onSelect,
+  onContextMenu
 }: {
   node: TreeNode;
   depth: number;
@@ -220,6 +224,7 @@ function Tree({
   toggle: (key: string) => void;
   activePath?: string;
   onSelect: (item: LibraryItemSummary) => void;
+  onContextMenu: (item: LibraryItemSummary, position: { x: number; y: number }) => void;
 }) {
   return (
     <div className="note-tree">
@@ -244,6 +249,7 @@ function Tree({
                 toggle={toggle}
                 activePath={activePath}
                 onSelect={onSelect}
+                onContextMenu={onContextMenu}
               />
             )}
           </div>
@@ -255,6 +261,11 @@ function Tree({
           style={{ paddingLeft: `${34 + depth * 14}px` }}
           key={`${item.vaultId}:${item.path}`}
           onClick={() => onSelect(item)}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onContextMenu(item, { x: event.clientX, y: event.clientY });
+          }}
         >
           {item.kind === "markdown" ? <FileText size={14} /> : <FileType2 className="word-file-icon" size={14} />}
           <span>{item.title}</span>

@@ -13,6 +13,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_opener::OpenerExt;
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -631,6 +632,53 @@ fn set_note_flag(
         word_files::set_word_flag(&state, &vault_id, &path, column, value)?;
     }
     Ok(())
+}
+
+#[tauri::command]
+fn reveal_library_item(
+    app: AppHandle,
+    state: State<AppState>,
+    vault_id: String,
+    path: String,
+) -> AppResult<()> {
+    let vault = get_vault(&state, &vault_id)?;
+    let absolute = resolve_library_item_path(Path::new(&vault.path), &path)?;
+    app.opener()
+        .reveal_item_in_dir(&absolute)
+        .map_err(|error| app_error("REVEAL_FAILED", format!("无法在文件管理器中显示：{error}")))
+}
+
+fn resolve_library_item_path(root: &Path, path: &str) -> AppResult<PathBuf> {
+    let root =
+        fs::canonicalize(root).map_err(|_| app_error("VAULT_UNAVAILABLE", "资料库不可用"))?;
+    let relative = Path::new(&path);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(app_error("INVALID_PATH", "文件路径不能离开资料库"));
+    }
+    let allowed = relative
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| {
+            value.eq_ignore_ascii_case("md")
+                || value.eq_ignore_ascii_case("docx")
+                || value.eq_ignore_ascii_case("doc")
+        });
+    if !allowed {
+        return Err(app_error("INVALID_PATH", "只能显示资料库中的笔记或文档"));
+    }
+    let absolute = fs::canonicalize(root.join(relative))
+        .map_err(|_| app_error("FILE_NOT_FOUND", "文件不存在"))?;
+    if !absolute.starts_with(&root) || !absolute.is_file() {
+        return Err(app_error("INVALID_PATH", "文件路径不能离开资料库"));
+    }
+    Ok(absolute)
 }
 
 #[tauri::command]
@@ -1557,6 +1605,7 @@ pub fn run() {
             rename_note,
             delete_note,
             set_note_flag,
+            reveal_library_item,
             search_notes,
             get_backlinks,
             import_attachment,
@@ -1585,6 +1634,21 @@ mod tests {
     fn rejects_paths_outside_a_vault() {
         assert!(safe_note_path(Path::new("/tmp/vault"), "../secret.md").is_err());
         assert!(safe_note_path(Path::new("/tmp/vault"), "notes/ok.md").is_ok());
+    }
+
+    #[test]
+    fn resolves_only_supported_library_files_for_reveal() {
+        let temporary = tempfile::tempdir().unwrap();
+        let note = temporary.path().join("笔记.md");
+        fs::write(&note, "# 笔记").unwrap();
+        assert_eq!(
+            resolve_library_item_path(temporary.path(), "笔记.md").unwrap(),
+            fs::canonicalize(note).unwrap()
+        );
+        assert!(resolve_library_item_path(temporary.path(), "../笔记.md").is_err());
+        let text = temporary.path().join("说明.txt");
+        fs::write(&text, "说明").unwrap();
+        assert!(resolve_library_item_path(temporary.path(), "说明.txt").is_err());
     }
 
     #[test]

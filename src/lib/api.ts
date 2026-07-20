@@ -29,6 +29,7 @@ export interface NativeApi {
   renameNote(vaultId: string, path: string, newName: string): Promise<NoteDocument>;
   deleteNote(vaultId: string, path: string): Promise<void>;
   setNoteFlag(vaultId: string, path: string, flag: "favorite" | "pinned", value: boolean): Promise<void>;
+  revealLibraryItem(vaultId: string, path: string): Promise<void>;
   search(query: string, vaultIds?: string[]): Promise<SearchHit[]>;
   backlinks(vaultId: string, path: string): Promise<Backlink[]>;
   importAttachment(vaultId: string, originalName: string, bytes: number[]): Promise<string>;
@@ -70,6 +71,8 @@ const tauriApi: NativeApi = {
   deleteNote: (vaultId, path) => invoke("delete_note", { vaultId, path }),
   setNoteFlag: (vaultId, path, flag, value) =>
     invoke("set_note_flag", { vaultId, path, flag, value }),
+  revealLibraryItem: (vaultId, path) =>
+    invoke("reveal_library_item", { vaultId, path }),
   search: (query, vaultIds) => invoke("search_notes", { query, vaultIds }),
   backlinks: (vaultId, path) => invoke("get_backlinks", { vaultId, path }),
   importAttachment: (vaultId, originalName, bytes) =>
@@ -201,6 +204,9 @@ const mockApi: NativeApi = {
       if (flag === "favorite") note.isFavorite = value;
       else note.isPinned = value;
     }
+  },
+  async revealLibraryItem() {
+    return;
   },
   async search(query, vaultIds) {
     const needle = query.toLocaleLowerCase();

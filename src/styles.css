@@ -1912,6 +1912,17 @@ kbd {
   line-height: 1.45;
 }
 
+.delete-item-dialog .danger-icon {
+  color: #bf5b52;
+  background: color-mix(in srgb, #bf5b52 14%, var(--surface));
+}
+
+.dialog-actions button.danger-confirm {
+  border-color: transparent;
+  color: white;
+  background: #b84f47;
+}
+
 .context-menu {
   position: fixed;
   z-index: 80;
@@ -1943,6 +1954,26 @@ kbd {
 
 .context-menu button.danger {
   color: #bf5b52;
+}
+
+.item-context-menu {
+  z-index: 110;
+  width: 210px;
+  padding: 6px;
+}
+
+.item-context-menu button {
+  height: 32px;
+}
+
+.item-menu-scrim {
+  z-index: 105;
+}
+
+.context-separator {
+  height: 1px;
+  margin: 5px 7px;
+  background: var(--border);
 }
 
 .menu-scrim {
