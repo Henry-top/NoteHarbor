@@ -13,6 +13,8 @@ describe("help helpers", () => {
   it("filters topics using titles, content and keywords", () => {
     expect(filterHelpTopics(helpTopics, "Word").map((topic) => topic.id)).toContain("word");
     expect(filterHelpTopics(helpTopics, "废纸篓").map((topic) => topic.id)).toContain("files");
+    expect(filterHelpTopics(helpTopics, "转为资料库文件").map((topic) => topic.id)).toContain("attachments");
+    expect(filterHelpTopics(helpTopics, "PDF").map((topic) => topic.id)).toContain("pdf");
     expect(filterHelpTopics(helpTopics, "找不到的功能")).toEqual([]);
   });
 
@@ -32,6 +34,6 @@ describe("help helpers", () => {
     expect(shouldShowOnboarding(storage)).toBe(true);
     completeOnboarding(storage);
     expect(shouldShowOnboarding(storage)).toBe(false);
-    expect(storage.setItem).toHaveBeenCalledWith("noteharbor:onboarding:v1", "completed");
+    expect(storage.setItem).toHaveBeenCalledWith("noteharbor:onboarding:v2", "completed");
   });
 });

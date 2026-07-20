@@ -2,10 +2,12 @@ import {
   ArrowLeft,
   ArrowRight,
   BookOpen,
+  FileDown,
   FileText,
   FileType2,
   FolderOpen,
   Link2,
+  Paperclip,
   Search,
   ShieldCheck,
   Sparkles
@@ -35,16 +37,36 @@ const steps = [
   },
   {
     eyebrow: "第二步",
-    title: "选择喜欢的编辑方式",
-    description: "Markdown 原文、即时渲染和左右分栏共用同一份内容，可以随时切换。",
+    title: "用 Markdown 或 TXT 记录",
+    description: "Markdown 和 TXT 都能自动保存，也能在原文、即时渲染和左右分栏之间随时切换。",
     icon: BookOpen,
     points: [
-      { icon: FileText, text: "输入内容后自动保存，无需手动操作" },
-      { icon: BookOpen, text: "标题、表格、数学公式和图表都能预览" }
+      { icon: FileText, text: "点击编辑区顶部的笔记名即可直接重命名" },
+      { icon: BookOpen, text: "TXT 保留 .txt，不写入 YAML 或标签" }
     ]
   },
   {
     eyebrow: "第三步",
+    title: "拖到哪里，就整理到哪里",
+    description: "从访达或文件资源管理器拖入文件，落点会决定它成为资料库文件还是当前笔记的附件。",
+    icon: FileDown,
+    points: [
+      { icon: FolderOpen, text: "拖到资料库或文件夹：导入为正式文件" },
+      { icon: Paperclip, text: "拖到编辑器：插入文字或建立附件链接" }
+    ]
+  },
+  {
+    eyebrow: "第四步",
+    title: "在软件内阅读常用文档",
+    description: "PDF、DOCX 和普通文件都保留原始格式，需要时仍可交给本地默认软件打开。",
+    icon: FileType2,
+    points: [
+      { icon: FileType2, text: "PDF 支持连续翻页、缩放、跳页和查找" },
+      { icon: FileType2, text: "DOCX 本地预览，外部原文件不会转换" }
+    ]
+  },
+  {
+    eyebrow: "第五步",
     title: "链接并快速找到笔记",
     description: "复制笔记链接并粘贴到其他笔记，即可建立关联；全局搜索可以跨资料库查找。",
     icon: Link2,
@@ -55,11 +77,11 @@ const steps = [
   },
   {
     eyebrow: "最后一步",
-    title: "文档、帮助和数据安全",
-    description: "Word 文档可以保留原文件并在软件内预览。需要帮助时，随时点击右上角问号或按 F1。",
-    icon: FileType2,
+    title: "整理文件，也保留掌控",
+    description: "附件页能查看实际位置和引用数量；需要更多说明时，点击右上角问号或按 F1。",
+    icon: ShieldCheck,
     points: [
-      { icon: FileType2, text: "DOCX 本地预览，原文件不会转换" },
+      { icon: Paperclip, text: "附件可转为资料库文件，不移动文件、不破坏链接" },
       { icon: BookOpen, text: "使用帮助可搜索，也能重新打开本引导" }
     ]
   }

@@ -1,10 +1,13 @@
 import {
   BookOpen,
+  FileDown,
   FileText,
   FileType2,
   Keyboard,
   Library,
   Link2,
+  Paperclip,
+  PanelsTopLeft,
   Search,
   ShieldCheck,
   Sparkles,
@@ -19,6 +22,9 @@ const topicIcons = {
   links: Link2,
   organize: Library,
   word: FileType2,
+  "drag-import": FileDown,
+  attachments: Paperclip,
+  pdf: PanelsTopLeft,
   files: ShieldCheck,
   shortcuts: Keyboard
 } as const;
@@ -66,7 +72,7 @@ export function HelpCenter({
             <span><BookOpen size={20} /></span>
             <div>
               <h2 id="help-center-title">使用帮助</h2>
-              <p>墨岛笔记完全离线的操作指南</p>
+              <p>墨岛笔记当前本地版操作指南</p>
             </div>
           </div>
           <label className="help-search">
@@ -100,7 +106,7 @@ export function HelpCenter({
             <div className="help-tour-card">
               <Sparkles size={17} />
               <strong>想重新熟悉一遍？</strong>
-              <span>再次查看五步新手引导。</span>
+              <span>再次查看七步新手引导。</span>
               <button onClick={onStartTour}>重新开始引导</button>
             </div>
           </nav>
@@ -131,7 +137,7 @@ export function HelpCenter({
               <div className="help-no-results">
                 <Search size={28} />
                 <h3>没有找到“{query}”</h3>
-                <p>可以尝试搜索“链接”“Word”“删除”或“快捷键”。</p>
+                <p>可以尝试搜索“拖拽”“附件”“PDF”“Word”或“快捷键”。</p>
               </div>
             )}
           </article>
